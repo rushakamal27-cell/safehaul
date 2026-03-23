@@ -1,0 +1,85 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Company {
+  id            String   @id @default(cuid())
+  name          String
+  samsaraOrgId  String?
+  createdAt     DateTime @default(now())
+  drivers       Driver[]
+}
+
+model Driver {
+  id               String            @id @default(cuid())
+  telegramUserId   String            @unique
+  samsaraDriverId  String?
+  name             String
+  companyId        String
+  company          Company           @relation(fields: [companyId], references: [id])
+  createdAt        DateTime          @default(now())
+  trips            Trip[]
+  safetyEvents     SafetyEvent[]
+  complianceScores ComplianceScore[]
+  incidents        Incident[]
+}
+
+model Trip {
+  id           String        @id @default(cuid())
+  driverId     String
+  driver       Driver        @relation(fields: [driverId], references: [id])
+  startedAt    DateTime
+  endedAt      DateTime?
+  milesDriven  Float         @default(0)
+  weatherData  Json?
+  createdAt    DateTime      @default(now())
+  safetyEvents SafetyEvent[]
+  incidents    Incident[]
+}
+
+model SafetyEvent {
+  id             String   @id @default(cuid())
+  driverId       String
+  driver         Driver   @relation(fields: [driverId], references: [id])
+  tripId         String?
+  trip           Trip?    @relation(fields: [tripId], references: [id])
+  eventType      String
+  severity       String
+  lat            Float?
+  lng            Float?
+  timestamp      DateTime
+  samsaraEventId String?
+  createdAt      DateTime @default(now())
+}
+
+model ComplianceScore {
+  id            String   @id @default(cuid())
+  driverId      String
+  driver        Driver   @relation(fields: [driverId], references: [id])
+  date          DateTime
+  score         Int
+  breakdownJson Json?
+  dangerLevel   String
+  createdAt     DateTime @default(now())
+}
+
+model Incident {
+  id            String   @id @default(cuid())
+  driverId      String
+  driver        Driver   @relation(fields: [driverId], references: [id])
+  tripId        String?
+  trip          Trip?    @relation(fields: [tripId], references: [id])
+  description   String?
+  transcript    String?
+  photoUrls     String[]
+  location      String?
+  fmcsaReported Boolean  @default(false)
+  createdAt     DateTime @default(now())
+}
