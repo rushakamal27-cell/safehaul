@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { RiskOutput } from "@/lib/riskEngine";
+import { useTelegram } from "@/lib/useTelegram";
 
 interface RiskResponse {
   driverId: string;
@@ -16,19 +17,53 @@ const LEVEL_STYLES: Record<string, { color: string; bg: string; border: string }
 };
 
 export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
+  const telegramUser = useTelegram();
+
   const [riskData, setRiskData] = useState<RiskResponse | null>(null);
   const [loading, setLoading]   = useState(true);
   const [error, setError]       = useState<string | null>(null);
 
   useEffect(() => {
-    fetch("/api/risk?driverId=123")
-      .then((res) => {
-        if (!res.ok) throw new Error(`Request failed: ${res.status}`);
-        return res.json() as Promise<RiskResponse>;
-      })
-      .then((data) => { setRiskData(data); setLoading(false); })
-      .catch((err) => { setError(err.message); setLoading(false); });
-  }, []);
+    // Wait until Telegram identity is resolved
+    if (!telegramUser) return;
+
+    let cancelled = false;
+
+    async function loadRisk() {
+      try {
+        // Step 1: resolve or create driver via telegramUserId
+        const driverRes = await fetch("/api/driver", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            telegramUserId: telegramUser!.id,
+            name: telegramUser!.firstName,
+          }),
+        });
+
+        if (!driverRes.ok) throw new Error(`Driver API failed: ${driverRes.status}`);
+        const { driver } = await driverRes.json();
+
+        // Step 2: fetch risk score using the real database driver ID
+        const riskRes = await fetch(`/api/risk?driverId=${driver.id}`);
+        if (!riskRes.ok) throw new Error(`Risk API failed: ${riskRes.status}`);
+        const riskData: RiskResponse = await riskRes.json();
+
+        if (!cancelled) {
+          setRiskData(riskData);
+          setLoading(false);
+        }
+      } catch (err: any) {
+        if (!cancelled) {
+          setError(err.message ?? "Failed to load risk data");
+          setLoading(false);
+        }
+      }
+    }
+
+    loadRisk();
+    return () => { cancelled = true; };
+  }, [telegramUser]);
 
   const result = riskData?.result;
   const levelStyle = result ? (LEVEL_STYLES[result.level] ?? LEVEL_STYLES.HIGH) : null;

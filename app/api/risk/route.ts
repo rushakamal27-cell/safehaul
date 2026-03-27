@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { calculateRisk, RiskInput } from "@/lib/riskEngine";
+import { calculateRisk } from "@/lib/riskEngine";
+import { getRiskInputForDriver } from "@/lib/samsara";
 
 export async function GET(request: NextRequest) {
   const driverId = request.nextUrl.searchParams.get("driverId");
@@ -11,24 +12,13 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  // TODO: Replace with live Samsara data once integration is built
-  const mockInput: RiskInput = {
-    safetyEvents: [
-      { type: "speeding", severity: 3 },
-      { type: "harsh_braking", severity: 2 },
-    ],
-    hosHours: 9.5,
-    weatherRisk: 0.6,
-    zoneRisk: 0.4,
-    speed: 74,
-  };
-
-  const result = calculateRisk(mockInput);
+  const input  = await getRiskInputForDriver(driverId);
+  const result = calculateRisk(input);
 
   return NextResponse.json({
     driverId,
     timestamp: new Date().toISOString(),
-    input: mockInput,
+    input,
     result,
   });
 }

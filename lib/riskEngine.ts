@@ -8,14 +8,16 @@ export interface RiskInput {
 
 export interface RiskFactor {
   name: string;
-  impact: number; // percentage of total penalty (0–100)
+  impact: number; // percentage of total penalty, sums to 100
 }
 
 export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+export type RiskTrend = "IMPROVING" | "STABLE" | "WORSENING";
 
 export interface RiskOutput {
   score: number;
   level: RiskLevel;
+  trend: RiskTrend;
   factors: RiskFactor[];
   recommendations: string[];
 }
@@ -66,29 +68,39 @@ function resolveLevel(score: number): RiskLevel {
 }
 
 // ---------------------------------------------------------------------------
-// Explainability — convert raw penalties to percentage factors
+// Explainability — largest-remainder rounding so factors sum to exactly 100
 // ---------------------------------------------------------------------------
 
-function buildFactors(penalties: Record<string, number>): RiskFactor[] {
-  const totalPenalty = Object.values(penalties).reduce((sum, v) => sum + v, 0);
+function buildFactors(displayPenalties: Record<string, number>): RiskFactor[] {
+  const totalPenalty = Object.values(displayPenalties).reduce((sum, v) => sum + v, 0);
 
   if (totalPenalty === 0) return [];
 
   const labelMap: Record<string, string> = {
     harshBraking: "Harsh Braking",
-    speeding: "Speeding",
-    fatigue: "Fatigue",
-    weather: "Weather",
-    zone: "Zone Risk",
-    speed: "Excessive Speed",
+    speeding:     "Speeding",
+    fatigue:      "Fatigue",
+    weather:      "Weather",
+    zone:         "Zone Risk",
   };
 
-  return Object.entries(penalties)
+  // Compute exact float percentages, keep only non-zero entries
+  const entries = Object.entries(displayPenalties)
     .filter(([, value]) => value > 0)
     .map(([key, value]) => ({
-      name: labelMap[key] ?? key,
-      impact: Math.round((value / totalPenalty) * 100),
-    }))
+      name:     labelMap[key] ?? key,
+      exact:    (value / totalPenalty) * 100,
+      floored:  Math.floor((value / totalPenalty) * 100),
+      remainder: ((value / totalPenalty) * 100) % 1,
+    }));
+
+  // Distribute leftover percentage points to entries with largest fractional remainders
+  const distributed = 100 - entries.reduce((sum, e) => sum + e.floored, 0);
+  entries.sort((a, b) => b.remainder - a.remainder);
+  entries.forEach((e, i) => { e.floored += i < distributed ? 1 : 0; });
+
+  return entries
+    .map(({ name, floored }) => ({ name, impact: floored }))
     .sort((a, b) => b.impact - a.impact);
 }
 
@@ -105,24 +117,24 @@ function buildRecommendations(
 
   const fatigueShare = totalPenalty > 0 ? penalties.fatigue / totalPenalty : 0;
   if (fatigueShare >= 0.2 || input.hosHours > 10) {
-    recs.push("Take a rest break — fatigue is significantly increasing your risk.");
+    recs.push("Consider a rest break soon.");
   }
 
   if (input.weatherRisk > 0.5) {
-    recs.push("Drive cautiously due to adverse weather conditions.");
+    recs.push("Use extra caution due to current weather conditions.");
   }
 
   const speedingPenalty = penalties.speeding + penalties.speed;
   if (speedingPenalty > 0) {
-    recs.push("Reduce speed to improve your safety score.");
+    recs.push("Reduce speed and maintain a safe following distance.");
   }
 
   if (input.zoneRisk > 0.5) {
-    recs.push("Exercise caution — you are in a high-risk zone.");
+    recs.push("Proceed carefully in the current risk zone.");
   }
 
   if (penalties.harshBraking > 0) {
-    recs.push("Increase following distance to reduce harsh braking events.");
+    recs.push("Increase following distance to avoid sudden stops.");
   }
 
   return recs;
@@ -136,10 +148,11 @@ export function calculateRisk(input: RiskInput): RiskOutput {
   const { harshBraking, speeding } = calcSafetyEventPenalties(input.safetyEvents);
   const fatigue = calcFatiguePenalty(input.hosHours);
   const weather = calcWeatherPenalty(input.weatherRisk);
-  const zone = calcZonePenalty(input.zoneRisk);
-  const speed = calcSpeedPenalty(input.speed);
+  const zone    = calcZonePenalty(input.zoneRisk);
+  const speed   = calcSpeedPenalty(input.speed);
 
-  const penalties: Record<string, number> = {
+  // All raw penalties — used for score calculation and recommendations
+  const rawPenalties: Record<string, number> = {
     harshBraking,
     speeding,
     fatigue,
@@ -148,14 +161,24 @@ export function calculateRisk(input: RiskInput): RiskOutput {
     speed,
   };
 
-  const totalPenalty = Object.values(penalties).reduce((sum, v) => sum + v, 0);
-  const rawScore = 100 - totalPenalty;
-  const score = Math.min(100, Math.max(0, Math.round(rawScore)));
+  // Display penalties — speeding event + excess speed merged into one "speeding" factor
+  const displayPenalties: Record<string, number> = {
+    harshBraking,
+    speeding: speeding + speed,
+    fatigue,
+    weather,
+    zone,
+  };
+
+  const totalPenalty = Object.values(rawPenalties).reduce((sum, v) => sum + v, 0);
+  const rawScore     = 100 - totalPenalty;
+  const score        = Math.min(100, Math.max(0, Math.round(rawScore)));
 
   return {
     score,
-    level: resolveLevel(score),
-    factors: buildFactors(penalties),
-    recommendations: buildRecommendations(input, penalties, totalPenalty),
+    level:           resolveLevel(score),
+    trend:           "STABLE",
+    factors:         buildFactors(displayPenalties),
+    recommendations: buildRecommendations(input, rawPenalties, totalPenalty),
   };
 }
