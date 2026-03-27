@@ -155,22 +155,7 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
         )}
       </div>
 
-      {/* ── Active Operational Zone (unchanged) ── */}
-      <p className="font-mono text-[10px] tracking-[2px] uppercase mb-[10px]" style={{ color: "var(--text-secondary)" }}>Active Operational Zone</p>
-      <div className="rounded-2xl p-[14px_16px] mb-4 relative overflow-hidden" style={{ background: "linear-gradient(135deg,#0d1a24,#0a1520)", border: "1px solid rgba(255,140,0,0.3)" }}>
-        <div className="flex items-center gap-2 mb-2">
-          <span className="w-2 h-2 rounded-full dot-pulse" style={{ background: "var(--orange)", boxShadow: "0 0 8px var(--orange)" }} />
-          <span className="font-mono text-[10px] tracking-[2px]" style={{ color: "var(--orange)" }}>ENTERING ZONE · GEO-FENCED</span>
-        </div>
-        <div className="font-display font-bold text-[15px] mb-[6px]" style={{ color: "var(--text-primary)" }}>Port of Savannah — Terminal Gate 7</div>
-        <div className="flex flex-wrap gap-[6px]">
-          {["⚠ HIGH PEDESTRIAN TRAFFIC", "🔍 INSPECTION LVL 8", "📡 V2X ACTIVE", "5 MPH LIMIT"].map((tag) => (
-            <span key={tag} className="font-mono text-[10px] px-2 py-[3px] rounded-[4px]" style={{ background: "rgba(255,140,0,0.1)", color: "var(--orange)", border: "1px solid rgba(255,140,0,0.25)" }}>{tag}</span>
-          ))}
-        </div>
-      </div>
-
-      {/* ── Incident Protocol (unchanged) ── */}
+      {/* ── Incident Protocol ── */}
       <button
         onClick={onIncident}
         className="w-full p-[18px] rounded-2xl mb-4 relative overflow-hidden flex items-center justify-center gap-[10px] font-display font-black text-[17px] tracking-[3px] uppercase cursor-pointer incident-hatch"
