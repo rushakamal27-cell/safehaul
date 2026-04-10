@@ -11,7 +11,7 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const location = getMockDriverLocation(driverId);
+  const location = await getMockDriverLocation(driverId);
 
   return NextResponse.json(location);
 }

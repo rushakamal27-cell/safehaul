@@ -1,16 +1,18 @@
 /**
  * lib/location.ts
  *
- * Mock location and operational context layer for SafeHaul.
- * Provides enriched driver context beyond raw vehicle stats:
- * zone names, human-readable labels, heading, and combined risk signals.
+ * Operational context layer for SafeHaul.
+ * Assembles enriched driver context from provider-layer sources in lib/samsara.ts.
  *
- * TODO: Replace getMockDriverLocation internals with:
- *   - SamsaraVehicleStats for lat, lng, currentSpeed (lib/samsara.ts)
- *   - Internal geo-fencing service for zoneName, zoneRisk
- *   - Weather API (e.g. OpenWeatherMap) for weatherRisk
- *   - Reverse-geocoding API for locationLabel
+ * All fields are sourced from getDriverVehicleContext and getDriverDailySummary.
+ * When those functions are backed by real Samsara data, this layer requires no changes.
+ *
+ * Remaining mock fields (sourced from scenario data in lib/mockScenarios.ts):
+ *   - heading → TODO: derive from consecutive GPS readings or Samsara heading field
+ *   - weatherRisk and zoneRisk are scenario-driven via samsara.ts; swap-in real providers there
  */
+
+import { getDriverVehicleContext, getDriverDailySummary } from "@/lib/samsara";
 
 export type CardinalHeading = "N" | "NE" | "E" | "SE" | "S" | "SW" | "W" | "NW";
 
@@ -24,21 +26,29 @@ export interface DriverLocation {
   currentSpeed: number;    // mph
   heading: CardinalHeading;
   weatherRisk: number;     // Normalized 0–1 weather risk score
+  checksPassed: number;    // Daily pre-trip / roadside inspection checks passed
+  milesDriven: number;     // Miles driven today
   updatedAt: string;       // ISO 8601 timestamp
 }
 
-export function getMockDriverLocation(driverId: string): DriverLocation {
-  // TODO: replace each field with a live data source (see file header)
+export async function getMockDriverLocation(driverId: string): Promise<DriverLocation> {
+  const [vehicle, daily] = await Promise.all([
+    getDriverVehicleContext(driverId),
+    getDriverDailySummary(driverId),
+  ]);
+
   return {
     driverId,
-    lat: 32.0835,
-    lng: -81.0998,
-    locationLabel: "I-16 W · Mile Marker 52, Chatham County, GA",
-    zoneName: "Port of Savannah — Terminal Gate 7",
-    zoneRisk: 0.4,
-    currentSpeed: 74,
-    heading: "W",
-    weatherRisk: 0.6,
-    updatedAt: new Date().toISOString(),
+    lat:           vehicle.lat,
+    lng:           vehicle.lng,
+    locationLabel: vehicle.locationLabel,
+    zoneName:      vehicle.zoneName,
+    zoneRisk:      vehicle.zoneRisk,
+    currentSpeed:  vehicle.currentSpeed,
+    heading:       "W",  // TODO: derive from consecutive GPS readings
+    weatherRisk:   vehicle.weatherRisk,
+    checksPassed:  daily.checksPassed,
+    milesDriven:   daily.milesDriven,
+    updatedAt:     new Date().toISOString(),
   };
 }

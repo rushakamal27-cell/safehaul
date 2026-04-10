@@ -35,7 +35,7 @@ export default function Home() {
       <DrivingOverlay isVisible={isDriving} onVoiceActivate={() => showToast("🎙️ Listening... Speak phraseology")} onCopyPhrase={(p) => { navigator.clipboard?.writeText(p); showToast("📋 Phrase copied"); }} />
       {!isDriving && (
         <main className="flex-1 px-4 overflow-y-auto" style={{ paddingBottom: "calc(90px + env(safe-area-inset-bottom, 0px))", paddingTop: "16px" }}>
-          {activeTab === "dash" && <DashboardScreen onIncident={() => showToast("⚡ INCIDENT PROTOCOL INITIATED — Recording...")} />}
+          {activeTab === "dash" && <DashboardScreen onIncident={() => showToast("⚡ Incident report submitted — visible in Audit trail")} />}
           {activeTab === "inspect" && <InspectScreen />}
           {activeTab === "audit" && <AuditScreen onGenerateReport={() => showToast("📄 Generating FMCSA-Ready PDF Report...")} onExpandCard={() => showToast("📄 Loading full event details...")} />}
         </main>

@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { useTelegram } from "@/lib/useTelegram";
 import { AuditEvent } from "@/lib/audit";
+import type { DriverLocation } from "@/lib/location";
 
 function EventCard({ date, badge, badgeType, title, detail, meta, onClick }: { date:string; badge:string; badgeType:"pass"|"fail"|"warn"|"info"; title:string; detail:string; meta:string[]; onClick:()=>void }) {
   const lines = { pass:"var(--green)", fail:"var(--red)", warn:"var(--orange)", info:"var(--cyan)" };
@@ -23,9 +24,10 @@ function EventCard({ date, badge, badgeType, title, detail, meta, onClick }: { d
 export function AuditScreen({ onGenerateReport, onExpandCard }: { onGenerateReport:()=>void; onExpandCard:()=>void }) {
   const telegramUser = useTelegram();
 
-  const [events, setEvents]   = useState<AuditEvent[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError]     = useState<string | null>(null);
+  const [events, setEvents]       = useState<AuditEvent[]>([]);
+  const [location, setLocation]   = useState<DriverLocation | null>(null);
+  const [loading, setLoading]     = useState(true);
+  const [error, setError]         = useState<string | null>(null);
 
   useEffect(() => {
     if (!telegramUser) return;
@@ -47,13 +49,18 @@ export function AuditScreen({ onGenerateReport, onExpandCard }: { onGenerateRepo
         if (!driverRes.ok) throw new Error(`Driver API failed: ${driverRes.status}`);
         const { driver } = await driverRes.json();
 
-        // Step 2: fetch audit events using the real database driver ID
-        const auditRes = await fetch(`/api/audit?driverId=${driver.id}`);
+        // Step 2: fetch audit events and location in parallel
+        const [auditRes, locationRes] = await Promise.all([
+          fetch(`/api/audit?driverId=${driver.id}`),
+          fetch(`/api/location?driverId=${driver.id}`),
+        ]);
+
         if (!auditRes.ok) throw new Error(`Audit API failed: ${auditRes.status}`);
         const data = await auditRes.json();
 
         if (!cancelled) {
           setEvents(data.events);
+          if (locationRes.ok) setLocation(await locationRes.json());
           setLoading(false);
         }
       } catch (err: any) {
@@ -77,7 +84,14 @@ export function AuditScreen({ onGenerateReport, onExpandCard }: { onGenerateRepo
 
       {/* ── Map (static, unchanged) ── */}
       <div className="rounded-xl p-[14px] mb-4 relative overflow-hidden" style={{background:"#050e0a",border:"1px solid rgba(0,200,255,0.2)"}}>
-        <div className="font-mono text-[9px] tracking-[2px] mb-[10px]" style={{color:"var(--cyan)"}}>📍 INCIDENT LOCATION MAP · SYNCED</div>
+        <div className="font-mono text-[9px] tracking-[2px] mb-[2px]" style={{color:"var(--cyan)"}}>
+          📍 {location ? location.locationLabel.toUpperCase() : "INCIDENT LOCATION MAP · SYNCED"}
+        </div>
+        {location?.zoneName && (
+          <div className="font-mono text-[9px] mb-[10px]" style={{color:"var(--text-secondary)"}}>
+            {location.zoneName}
+          </div>
+        )}
         <div className="w-full h-[120px] relative rounded-[6px]" style={{backgroundImage:"linear-gradient(rgba(0,200,255,0.04) 1px,transparent 1px),linear-gradient(90deg,rgba(0,200,255,0.04) 1px,transparent 1px)",backgroundSize:"20px 20px"}}>
           <svg style={{position:"absolute",inset:0,width:"100%",height:"100%"}} viewBox="0 0 340 120">
             <polyline points="30,90 80,70 130,60 170,65 210,45 260,50 310,35" fill="none" stroke="rgba(0,200,255,0.3)" strokeWidth="2" strokeDasharray="5,3"/>
@@ -105,6 +119,12 @@ export function AuditScreen({ onGenerateReport, onExpandCard }: { onGenerateRepo
       {error && (
         <p className="font-mono text-[11px] text-center py-4" style={{color:"var(--red)"}}>
           Failed to load audit events
+        </p>
+      )}
+
+      {!loading && !error && events.length === 0 && (
+        <p className="font-mono text-[11px] text-center py-8" style={{color:"var(--text-secondary)"}}>
+          No events recorded yet.{"\n"}Open the Dashboard to begin tracking.
         </p>
       )}
 
