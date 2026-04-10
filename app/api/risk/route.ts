@@ -55,7 +55,7 @@ export async function GET(request: NextRequest) {
         date:          today,
         score:         result.score,
         dangerLevel:   result.level,
-        breakdownJson: result.factors as Prisma.InputJsonValue,
+        breakdownJson: result.factors as unknown as Prisma.InputJsonValue,
       },
     });
   }
