@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { calculateRisk } from "@/lib/riskEngine";
 import { getRiskInputForDriver, getDriverVehicleContext, getDriverDailySummary } from "@/lib/samsara";
 import { prisma } from "@/lib/prisma";
+import { Prisma } from "@/lib/generated/prisma";
 import { getOrCreateTodayTrip } from "@/lib/trip";
 
 export async function GET(request: NextRequest) {
@@ -54,7 +55,7 @@ export async function GET(request: NextRequest) {
         date:          today,
         score:         result.score,
         dangerLevel:   result.level,
-        breakdownJson: result.factors,  // [{ name, impact }, ...]
+        breakdownJson: result.factors as Prisma.InputJsonValue,
       },
     });
   }
