@@ -103,23 +103,14 @@ function weatherDataToRisk(data: any): number {
  */
 async function getWeatherRisk(scenario: MockScenario): Promise<number> {
   const apiKey = process.env.OPENWEATHER_API_KEY;
-  if (!apiKey) {
-    console.log("[getWeatherRisk] no key → scenario fallback:", scenario.weatherRisk);
-    return scenario.weatherRisk;
-  }
+  if (!apiKey) return scenario.weatherRisk;
 
   try {
     const url = `https://api.openweathermap.org/data/2.5/weather?lat=${scenario.lat}&lon=${scenario.lng}&appid=${apiKey}`;
     const res = await fetch(url, { next: { revalidate: 300 } }); // cache 5 min
-    if (!res.ok) {
-      console.log("[getWeatherRisk] API error", res.status, "→ scenario fallback:", scenario.weatherRisk);
-      return scenario.weatherRisk;
-    }
-    const risk = weatherDataToRisk(await res.json());
-    console.log("[getWeatherRisk] live OpenWeather →", risk, "(scenario was:", scenario.weatherRisk, ")");
-    return risk;
-  } catch (err) {
-    console.log("[getWeatherRisk] fetch failed →", err, "→ scenario fallback:", scenario.weatherRisk);
+    if (!res.ok) return scenario.weatherRisk;
+    return weatherDataToRisk(await res.json());
+  } catch {
     return scenario.weatherRisk;
   }
 }
