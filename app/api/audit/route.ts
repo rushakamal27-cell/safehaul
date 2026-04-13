@@ -50,7 +50,7 @@ export async function GET(request: NextRequest) {
       detail: inc.description ?? "No description provided.",
       meta: [
         ...(inc.location ? [`📍 ${inc.location}`] : []),
-        "⚡ Protocol initiated",
+        "Driver-initiated report",
       ],
     },
   }));
@@ -68,9 +68,9 @@ export async function GET(request: NextRequest) {
         badge,
         badgeType,
         title: formatEventType(ev.eventType),
-        detail: `Severity ${ev.severity} · ${formatEventType(ev.eventType)} detected by vehicle telematics.`,
+        detail: `Severity ${ev.severity}/5 · Recorded by the vehicle's onboard safety system.`,
         meta: [
-          ...(ev.lat && ev.lng ? [`📍 ${ev.lat.toFixed(4)}, ${ev.lng.toFixed(4)}`] : []),
+          ...(ev.lat && ev.lng ? [`📍 GPS location recorded`] : []),
           `⚠ Severity ${ev.severity}/5`,
         ],
       },
@@ -86,11 +86,11 @@ export async function GET(request: NextRequest) {
       event: {
         id: cs.id,
         date: formatAuditDate(cs.date),
-        badge: cs.dangerLevel,
+        badge: `${cs.dangerLevel} RISK`,
         badgeType,
         title: "Daily Compliance Score",
-        detail: `Score: ${cs.score}/100 · Risk level: ${cs.dangerLevel}`,
-        meta: [`📊 ${cs.score}/100`, `🏷 ${cs.dangerLevel}`],
+        detail: `Driver safety score: ${cs.score} out of 100`,
+        meta: [`📊 ${cs.score}/100`],
       },
     };
   });
@@ -108,14 +108,14 @@ export async function GET(request: NextRequest) {
         badge:     "TRIP",
         badgeType: "info" as const,
         title:     "Daily Trip",
-        detail:    [loc, zone].filter(Boolean).join(" · ") || "Trip recorded.",
+        detail:    [loc, zone].filter(Boolean).join(" · ") || "Trip logged. Location data not available.",
         meta: [
           ...(miles ? [`🛣 ${miles}`] : []),
           ...(weather?.weatherRisk != null
             ? [`🌦 Weather Risk ${Math.round(weather.weatherRisk * 100)}%`]
             : []),
           ...(weather?.zoneRisk != null
-            ? [`📍 Zone Risk ${Math.round(weather.zoneRisk * 100)}%`]
+            ? [`🗺 Area Risk ${Math.round(weather.zoneRisk * 100)}%`]
             : []),
         ],
       },
