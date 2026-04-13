@@ -28,6 +28,11 @@ export function AuditScreen({ onGenerateReport, onExpandCard }: { onGenerateRepo
   const [location, setLocation]   = useState<DriverLocation | null>(null);
   const [loading, setLoading]     = useState(true);
   const [error, setError]         = useState<string | null>(null);
+  const [showAll, setShowAll]     = useState(false);
+
+  const PAGE = 10;
+  const visibleEvents = showAll ? events : events.slice(0, PAGE);
+  const hasMore       = events.length > PAGE;
 
   useEffect(() => {
     if (!telegramUser) return;
@@ -128,7 +133,7 @@ export function AuditScreen({ onGenerateReport, onExpandCard }: { onGenerateRepo
         </p>
       )}
 
-      {!loading && !error && events.map((evt) => (
+      {!loading && !error && visibleEvents.map((evt) => (
         <EventCard
           key={evt.id}
           date={evt.date}
@@ -140,6 +145,16 @@ export function AuditScreen({ onGenerateReport, onExpandCard }: { onGenerateRepo
           onClick={onExpandCard}
         />
       ))}
+
+      {!loading && !error && hasMore && (
+        <button
+          onClick={() => setShowAll((prev) => !prev)}
+          className="w-full py-[10px] font-mono text-[11px] tracking-[1px] rounded-xl mt-1 mb-2"
+          style={{ background: "var(--bg-card)", border: "1px solid var(--border)", color: "var(--cyan)" }}
+        >
+          {showAll ? "Show fewer" : `View full audit trail (${events.length - PAGE} more)`}
+        </button>
+      )}
     </div>
   );
 }
