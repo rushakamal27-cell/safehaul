@@ -181,8 +181,10 @@ model RawProviderEvent {
   receivedAt      DateTime      @default(now())
   driverEvents    DriverEvent[]
 
-  @@index([provider])
-  @@index([externalEventId])
+  // Unique on (provider, externalEventId) when externalEventId is non-null.
+  // PostgreSQL allows multiple NULL values under a partial unique constraint,
+  // so events without a provider-side ID are stored freely (no false dedup).
+  @@unique([provider, externalEventId])
   @@index([receivedAt])
 }
 

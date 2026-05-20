@@ -1,18 +1,21 @@
 /**
  * app/api/webhooks/samsara/route.ts
  *
- * Inbound Samsara webhook endpoint — Phase 3: Event normalization.
+ * Inbound Samsara webhook endpoint — Phase 4A: Idempotent ingestion.
  *
  * Flow:
  *   1. Read raw body bytes
  *   2. Verify signature + timestamp
  *   3. Parse payload (JSON)
- *   4. Persist WebhookLog (receipt audit trail)
- *   5. Persist RawProviderEvent (pre-normalization audit trail)
+ *   4. Persist WebhookLog (always — full HTTP receipt trail)
+ *   5. Dedup check + persist RawProviderEvent
+ *        → findUnique on (provider, externalEventId) if ID present
+ *        → catch P2002 for simultaneous-retry race condition
+ *        → early return 200 { duplicate: true } if already processed
  *   6. Normalize payload → NormalizedProviderEvent[]
  *   7. For each normalized event:
  *        a. Look up DriverProviderMapping by (provider, externalDriverId)
- *        b. Skip if not found (log + continue)
+ *        b. Skip if not found or inactive (log + continue)
  *        c. Skip if isPilot = false (log + continue)
  *        d. Create DriverEvent row
  *   8. Return accepted summary
@@ -35,6 +38,7 @@ import {
 } from "@/lib/providers/samsara/verifyWebhook";
 import {
   extractSamsaraMetadata,
+  extractExternalEventId,
   type SamsaraWebhookEnvelope,
 } from "@/lib/providers/samsara/types";
 import { normalizeSamsaraEvent } from "@/lib/providers/samsara/normalizeEvent";
@@ -82,7 +86,13 @@ export async function POST(request: NextRequest) {
 
   const { eventType, externalDriverId } = extractSamsaraMetadata(payload);
 
-  // ── Step 4: Persist WebhookLog (receipt layer) ────────────────────────────
+  // Extract the provider-side dedup key early — needed before RawProviderEvent creation.
+  // null means no ID available; those events cannot be deduplicated and are always stored.
+  const externalEventId = extractExternalEventId(payload);
+
+  // ── Step 4: Persist WebhookLog (receipt layer — always written) ───────────
+  // Written for every verified request, including duplicates, so the HTTP-level
+  // receipt trail is always complete regardless of dedup outcome.
   let webhookLogId: string | undefined;
   try {
     const log = await prisma.webhookLog.create({
@@ -102,25 +112,80 @@ export async function POST(request: NextRequest) {
     console.error("[webhook/samsara] Failed to write WebhookLog:", err);
   }
 
-  // ── Step 5: Persist RawProviderEvent ─────────────────────────────────────
-  // Stores the parsed payload before normalization — enables replay if normalization logic changes.
+  // ── Step 5: Deduplication check + RawProviderEvent persistence ───────────
+  // Strategy:
+  //   a) If externalEventId is null → no dedup possible, always create.
+  //   b) If externalEventId is present → findUnique first (optimistic path).
+  //   c) If not found → create; catch P2002 for the race where two retries
+  //      arrive simultaneously and both pass the findUnique check.
+  //   d) If found (either via findUnique or P2002) → mark as duplicate,
+  //      skip all DriverEvent creation below.
   let rawProviderEventId: string | undefined;
+  let isDuplicate = false;
+
   try {
-    const raw = await prisma.rawProviderEvent.create({
-      data: {
-        provider:        PROVIDER,
-        webhookLogId:    webhookLogId ?? null,
-        // TODO: Extract provider's own event ID here for deduplication (Phase 4).
-        //       Field path TBD — may be payload.eventId or payload.data?.id.
-        externalEventId: null,
-        rawPayload:      payload as object,
-        receivedAt:      new Date(),
-      },
-      select: { id: true },
-    });
-    rawProviderEventId = raw.id;
+    if (externalEventId) {
+      // Optimistic check — avoids a write on the common retry case
+      const existing = await prisma.rawProviderEvent.findUnique({
+        where: {
+          provider_externalEventId: { provider: PROVIDER, externalEventId },
+        },
+        select: { id: true },
+      });
+
+      if (existing) {
+        isDuplicate = true;
+        rawProviderEventId = existing.id;
+        console.info(
+          `[webhook/samsara] Duplicate externalEventId="${externalEventId}" — skipping DriverEvent creation`
+        );
+      }
+    }
+
+    if (!isDuplicate) {
+      try {
+        const raw = await prisma.rawProviderEvent.create({
+          data: {
+            provider:        PROVIDER,
+            webhookLogId:    webhookLogId ?? null,
+            externalEventId: externalEventId ?? null,
+            rawPayload:      payload as object,
+            receivedAt:      new Date(),
+          },
+          select: { id: true },
+        });
+        rawProviderEventId = raw.id;
+      } catch (createErr: any) {
+        // P2002 = unique constraint violation — race condition between two retries
+        if (createErr?.code === "P2002") {
+          isDuplicate = true;
+          console.info(
+            `[webhook/samsara] Race-condition duplicate for externalEventId="${externalEventId}" — skipping DriverEvent creation`
+          );
+          // Fetch the existing row's ID so we still have referential context in logs
+          const existing = await prisma.rawProviderEvent.findUnique({
+            where: {
+              provider_externalEventId: { provider: PROVIDER, externalEventId: externalEventId! },
+            },
+            select: { id: true },
+          });
+          rawProviderEventId = existing?.id;
+        } else {
+          throw createErr; // unexpected error — rethrow to outer catch
+        }
+      }
+    }
   } catch (err) {
-    console.error("[webhook/samsara] Failed to write RawProviderEvent:", err);
+    console.error("[webhook/samsara] Failed to persist RawProviderEvent:", err);
+  }
+
+  // Early return for confirmed duplicates — no further processing needed
+  if (isDuplicate) {
+    return NextResponse.json({
+      accepted:  true,
+      duplicate: true,
+      driverEventsCreated: 0,
+    }, { status: 200 });
   }
 
   // ── Step 6: Normalize payload ─────────────────────────────────────────────
@@ -128,8 +193,8 @@ export async function POST(request: NextRequest) {
   const normalizedEvents = normalizeSamsaraEvent(payload);
 
   // Counters for the summary response
-  let driversMatched    = 0;
-  let pilotDrivers      = 0;
+  let driversMatched      = 0;
+  let pilotDrivers        = 0;
   let driverEventsCreated = 0;
 
   // ── Step 7: Resolve mappings + create DriverEvents ────────────────────────
@@ -155,7 +220,7 @@ export async function POST(request: NextRequest) {
 
       driversMatched++;
 
-      // 7b. Skip if inactive mapping
+      // 7b. Skip inactive mappings
       if (!mapping.isActive) {
         console.info(
           `[webhook/samsara] Mapping for externalDriverId="${event.externalDriverId}" is inactive — skipping`
@@ -210,6 +275,7 @@ export async function POST(request: NextRequest) {
   // ── Step 8: Return accepted summary ──────────────────────────────────────
   return NextResponse.json({
     accepted:            true,
+    duplicate:           false,
     eventsReceived:      normalizedEvents.length,
     driversMatched,
     pilotDrivers,

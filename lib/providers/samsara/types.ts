@@ -86,3 +86,26 @@ export function extractSamsaraMetadata(payload: SamsaraWebhookEnvelope): {
     externalDriverId: payload.data?.driver?.id ?? null,
   };
 }
+
+/**
+ * Extracts the provider-side deduplication ID from a Samsara payload.
+ * Returns null if no ID can be found — events without IDs cannot be deduplicated.
+ *
+ * TODO: Confirm the exact field name(s) against Samsara's webhook documentation.
+ *       Observed candidates:
+ *         payload.eventId        — top-level event UUID
+ *         payload.data?.id       — event-specific ID nested under data
+ *       Test with a real Samsara safety event payload before relying on this.
+ */
+export function extractExternalEventId(
+  payload: SamsaraWebhookEnvelope
+): string | null {
+  if (typeof payload.eventId === "string" && payload.eventId.length > 0) {
+    return payload.eventId;
+  }
+  const dataId = payload.data?.["id"];
+  if (typeof dataId === "string" && dataId.length > 0) {
+    return dataId;
+  }
+  return null;
+}
