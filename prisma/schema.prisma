@@ -29,6 +29,7 @@ model Driver {
   safetyEvents     SafetyEvent[]
   complianceScores ComplianceScore[]
   incidents        Incident[]
+  inspections      Inspection[]
 }
 
 model Trip {
@@ -42,6 +43,7 @@ model Trip {
   createdAt    DateTime      @default(now())
   safetyEvents SafetyEvent[]
   incidents    Incident[]
+  inspections  Inspection[]
 }
 
 model SafetyEvent {
@@ -81,5 +83,22 @@ model Incident {
   photoUrls     String[]
   location      String?
   fmcsaReported Boolean  @default(false)
+  createdAt     DateTime @default(now())
+}
+
+model Inspection {
+  id            String   @id @default(cuid())
+  driverId      String
+  driver        Driver   @relation(fields: [driverId], references: [id])
+  tripId        String?
+  trip          Trip?    @relation(fields: [tripId], references: [id])
+  photoUrl      String?  // Supabase Storage path; null after photo expiry
+  photosExpired Boolean  @default(false)
+  overallResult String   // "PASS" | "WARN" | "FAIL"
+  summary       String
+  confidence    Float
+  checkItems    Json     // CheckItem[]
+  analysisJson  Json     // raw AI response
+  retainUntil   DateTime // photo expiry date (row is kept permanently)
   createdAt     DateTime @default(now())
 }

@@ -29,11 +29,12 @@ export async function GET(request: NextRequest) {
   }
 
   // Fetch all real event tables in parallel
-  const [incidents, safetyEvents, complianceScores, trips] = await Promise.all([
+  const [incidents, safetyEvents, complianceScores, trips, inspections] = await Promise.all([
     prisma.incident.findMany({ where: { driverId }, orderBy: { createdAt: "desc" } }),
     prisma.safetyEvent.findMany({ where: { driverId }, orderBy: { timestamp: "desc" } }),
     prisma.complianceScore.findMany({ where: { driverId }, orderBy: { date: "desc" } }),
     prisma.trip.findMany({ where: { driverId }, orderBy: { startedAt: "desc" } }),
+    prisma.inspection.findMany({ where: { driverId }, orderBy: { createdAt: "desc" } }),
   ]);
 
   // Intermediate type for unified sort before stripping timestamp
@@ -122,8 +123,32 @@ export async function GET(request: NextRequest) {
     };
   });
 
+  const inspectionItems: Stamped[] = inspections.map((ins) => {
+    const badgeType: AuditEvent["badgeType"] =
+      ins.overallResult === "PASS" ? "pass" :
+      ins.overallResult === "WARN" ? "warn" : "fail";
+    const badge =
+      ins.overallResult === "PASS" ? "PASSED" :
+      ins.overallResult === "WARN" ? "WARNING" : "FAILED";
+    return {
+      ts: ins.createdAt,
+      event: {
+        id:        ins.id,
+        date:      formatAuditDate(ins.createdAt),
+        badge,
+        badgeType,
+        title:     "Pre-Trip Inspection",
+        detail:    ins.summary,
+        meta: [
+          "📷 Photo analyzed",
+          `🎯 ${Math.round(ins.confidence * 100)}% confidence`,
+        ],
+      },
+    };
+  });
+
   // Merge all real events, sorted by timestamp descending
-  const allReal = [...incidentItems, ...safetyItems, ...complianceItems, ...tripItems]
+  const allReal = [...incidentItems, ...safetyItems, ...complianceItems, ...tripItems, ...inspectionItems]
     .sort((a, b) => b.ts.getTime() - a.ts.getTime())
     .map((s) => s.event);
 
