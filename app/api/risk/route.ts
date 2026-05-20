@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { calculateRisk } from "@/lib/riskEngine";
 import { getRiskInputForDriver, getDriverVehicleContext, getDriverDailySummary } from "@/lib/samsara";
+import { isPilotDriver, getRecentDriverEvents, driverEventsToRiskSafetyEvents } from "@/lib/driverEvents";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/lib/generated/prisma";
 import { getOrCreateTodayTrip } from "@/lib/trip";
@@ -15,12 +16,22 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const [input, vehicle, tripId, daily] = await Promise.all([
+  const [input, vehicle, tripId, daily, pilotDriver] = await Promise.all([
     getRiskInputForDriver(driverId),
     getDriverVehicleContext(driverId),
     getOrCreateTodayTrip(driverId),
     getDriverDailySummary(driverId),
+    isPilotDriver(driverId),
   ]);
+
+  // Hybrid input: pilot drivers get real DriverEvent rows; non-pilots keep mock scenario.
+  // For pilot drivers, real events fully replace the mock safetyEvents array.
+  // An empty real-events array means the pilot has a clean window — score reflects that.
+  if (pilotDriver) {
+    const realEvents = await getRecentDriverEvents(driverId);
+    input.safetyEvents = driverEventsToRiskSafetyEvents(realEvents);
+  }
+
   const result = calculateRisk(input);
 
   // Stamp current mileage and environmental snapshot on the active trip.
@@ -60,9 +71,10 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  // Persist today's safety events if none yet recorded for this driver today.
+  // Persist today's safety events for non-pilot drivers only.
+  // Pilot drivers: real events live in DriverEvent (via webhook pipeline) — no duplication.
   // Guard prevents re-writing identical scenario events on repeated refreshes.
-  if (input.safetyEvents.length > 0) {
+  if (!pilotDriver && input.safetyEvents.length > 0) {
     const existingEvent = await prisma.safetyEvent.findFirst({
       where: { driverId, timestamp: { gte: today } },
       select: { id: true },
@@ -86,7 +98,8 @@ export async function GET(request: NextRequest) {
 
   return NextResponse.json({
     driverId,
-    timestamp: new Date().toISOString(),
+    timestamp:   new Date().toISOString(),
+    dataSource:  pilotDriver ? "real" : "mock",
     input,
     result,
   });

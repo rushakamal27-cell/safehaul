@@ -28,16 +28,26 @@ export interface RiskOutput {
 
 function calcSafetyEventPenalties(
   events: RiskInput["safetyEvents"]
-): { harshBraking: number; speeding: number } {
-  let harshBraking = 0;
-  let speeding = 0;
+): { harshBraking: number; speeding: number; harshManeuver: number; distraction: number; mechanical: number } {
+  let harshBraking  = 0;
+  let speeding      = 0;
+  let harshManeuver = 0;
+  let distraction   = 0;
+  let mechanical    = 0;
 
   for (const event of events) {
-    if (event.type === "harsh_braking") harshBraking += 2 * event.severity;
-    else if (event.type === "speeding") speeding += 3 * event.severity;
+    switch (event.type) {
+      case "harsh_braking":          harshBraking  += 2   * event.severity; break;
+      case "speeding":               speeding      += 3   * event.severity; break;
+      case "harsh_accel":            harshManeuver += 1.5 * event.severity; break;
+      case "harsh_turn":             harshManeuver += 1.5 * event.severity; break;
+      case "mobile_usage":           distraction   += 3   * event.severity; break;
+      case "inattentive_driving":    distraction   += 2.5 * event.severity; break;
+      case "high_speed_power_loss":  mechanical    += 4   * event.severity; break;
+    }
   }
 
-  return { harshBraking, speeding };
+  return { harshBraking, speeding, harshManeuver, distraction, mechanical };
 }
 
 function calcFatiguePenalty(hosHours: number): number {
@@ -77,11 +87,14 @@ function buildFactors(displayPenalties: Record<string, number>): RiskFactor[] {
   if (totalPenalty === 0) return [];
 
   const labelMap: Record<string, string> = {
-    harshBraking: "Harsh Braking",
-    speeding:     "Speeding",
-    fatigue:      "Fatigue",
-    weather:      "Weather",
-    zone:         "Zone Risk",
+    harshBraking:  "Harsh Braking",
+    speeding:      "Speeding",
+    harshManeuver: "Harsh Maneuver",
+    distraction:   "Distracted Driving",
+    mechanical:    "Mechanical Risk",
+    fatigue:       "Fatigue",
+    weather:       "Weather",
+    zone:          "Zone Risk",
   };
 
   // Compute exact float percentages, keep only non-zero entries
@@ -137,6 +150,18 @@ function buildRecommendations(
     recs.push("Increase following distance to avoid sudden stops.");
   }
 
+  if (penalties.harshManeuver > 0) {
+    recs.push("Smooth acceleration and turns improve safety and fuel efficiency.");
+  }
+
+  if (penalties.distraction > 0) {
+    recs.push("Put the phone away — distracted driving is a leading cause of crashes.");
+  }
+
+  if (penalties.mechanical > 0) {
+    recs.push("High-speed power loss detected — pull over safely and inspect the vehicle.");
+  }
+
   return recs;
 }
 
@@ -145,7 +170,8 @@ function buildRecommendations(
 // ---------------------------------------------------------------------------
 
 export function calculateRisk(input: RiskInput): RiskOutput {
-  const { harshBraking, speeding } = calcSafetyEventPenalties(input.safetyEvents);
+  const { harshBraking, speeding, harshManeuver, distraction, mechanical } =
+    calcSafetyEventPenalties(input.safetyEvents);
   const fatigue = calcFatiguePenalty(input.hosHours);
   const weather = calcWeatherPenalty(input.weatherRisk);
   const zone    = calcZonePenalty(input.zoneRisk);
@@ -155,6 +181,9 @@ export function calculateRisk(input: RiskInput): RiskOutput {
   const rawPenalties: Record<string, number> = {
     harshBraking,
     speeding,
+    harshManeuver,
+    distraction,
+    mechanical,
     fatigue,
     weather,
     zone,
@@ -165,6 +194,9 @@ export function calculateRisk(input: RiskInput): RiskOutput {
   const displayPenalties: Record<string, number> = {
     harshBraking,
     speeding: speeding + speed,
+    harshManeuver,
+    distraction,
+    mechanical,
     fatigue,
     weather,
     zone,
