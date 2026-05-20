@@ -10,26 +10,28 @@ datasource db {
 }
 
 model Company {
-  id            String   @id @default(cuid())
-  name          String
-  samsaraOrgId  String?
-  createdAt     DateTime @default(now())
-  drivers       Driver[]
+  id           String   @id @default(cuid())
+  name         String
+  samsaraOrgId String?
+  createdAt    DateTime @default(now())
+  drivers      Driver[]
 }
 
 model Driver {
-  id               String            @id @default(cuid())
-  telegramUserId   String            @unique
+  id               String                  @id @default(cuid())
+  telegramUserId   String                  @unique
   samsaraDriverId  String?
   name             String
   companyId        String
-  company          Company           @relation(fields: [companyId], references: [id])
-  createdAt        DateTime          @default(now())
+  company          Company                 @relation(fields: [companyId], references: [id])
+  createdAt        DateTime                @default(now())
   trips            Trip[]
   safetyEvents     SafetyEvent[]
   complianceScores ComplianceScore[]
   incidents        Incident[]
   inspections      Inspection[]
+  providerMappings DriverProviderMapping[]
+  driverEvents     DriverEvent[]
 }
 
 model Trip {
@@ -92,13 +94,121 @@ model Inspection {
   driver        Driver   @relation(fields: [driverId], references: [id])
   tripId        String?
   trip          Trip?    @relation(fields: [tripId], references: [id])
-  photoUrl      String?  // Supabase Storage path; null after photo expiry
+  photoUrl      String? // Supabase Storage path; null after photo expiry
   photosExpired Boolean  @default(false)
-  overallResult String   // "PASS" | "WARN" | "FAIL"
+  overallResult String // "PASS" | "WARN" | "FAIL"
   summary       String
   confidence    Float
-  checkItems    Json     // CheckItem[]
-  analysisJson  Json     // raw AI response
+  checkItems    Json // CheckItem[]
+  analysisJson  Json // raw AI response
   retainUntil   DateTime // photo expiry date (row is kept permanently)
   createdAt     DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Provider integration layer
+// ---------------------------------------------------------------------------
+
+/// One row per external provider organisation (e.g. a Samsara fleet account).
+/// Holds org-level config and pilot flag so pilot cohorts can be filtered
+/// at the account level as well as at the individual driver level.
+model ProviderAccount {
+  id            String                  @id @default(cuid())
+  provider      String // "samsara" | "geotab" | future providers
+  name          String // human-readable label, e.g. "Acme Samsara Fleet"
+  externalOrgId String? // org / fleet ID in the provider system
+  isPilot       Boolean                 @default(false)
+  isActive      Boolean                 @default(true)
+  createdAt     DateTime                @default(now())
+  mappings      DriverProviderMapping[]
+
+  @@unique([provider, externalOrgId])
+  @@index([provider])
+  @@index([isPilot])
+}
+
+/// Maps one SafeHaul Driver to one external provider driver identity.
+/// Exactly one mapping per driver per provider is enforced by the unique constraint.
+/// `provider` is denormalized from ProviderAccount for direct filtering without a join.
+model DriverProviderMapping {
+  id                String           @id @default(cuid())
+  driverId          String
+  driver            Driver           @relation(fields: [driverId], references: [id])
+  providerAccountId String?
+  providerAccount   ProviderAccount? @relation(fields: [providerAccountId], references: [id])
+  provider          String // "samsara" | "geotab" | etc. (denormalized)
+  externalDriverId  String // driver ID in the external system
+  externalVehicleId String? // vehicle / asset ID in the external system
+  isPilot           Boolean          @default(false)
+  isActive          Boolean          @default(true)
+  syncedAt          DateTime? // timestamp of last successful data sync
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+
+  @@unique([provider, externalDriverId])
+  @@unique([driverId, provider])
+  @@index([driverId])
+  @@index([isPilot])
+  @@index([provider])
+}
+
+/// Raw receipt log for every verified inbound webhook (HTTP request layer).
+/// One row per verified POST request, regardless of whether the event was processed.
+model WebhookLog {
+  id                String             @id @default(cuid())
+  provider          String             // "samsara" | future providers
+  eventType         String?            // event type extracted from payload, if available
+  externalDriverId  String?            // external driver ID extracted from payload, if available
+  rawPayload        Json               // full payload preserved for replay / debugging
+  receivedAt        DateTime           @default(now())
+  rawProviderEvents RawProviderEvent[]
+
+  @@index([provider])
+  @@index([receivedAt])
+  @@index([externalDriverId])
+}
+
+/// Parsed provider event — one row per discrete event extracted from a webhook.
+/// Stores the raw payload for replay and links forward to normalized DriverEvent rows.
+/// Created after successful payload parse, before normalization or driver resolution.
+model RawProviderEvent {
+  id              String        @id @default(cuid())
+  webhookLogId    String?
+  webhookLog      WebhookLog?   @relation(fields: [webhookLogId], references: [id])
+  provider        String        // "samsara" | future providers
+  externalEventId String?       // provider's deduplication ID — TODO: use for idempotency
+  rawPayload      Json          // full raw event payload from provider
+  receivedAt      DateTime      @default(now())
+  driverEvents    DriverEvent[]
+
+  @@index([provider])
+  @@index([externalEventId])
+  @@index([receivedAt])
+}
+
+/// Provider-neutral normalized driver safety event.
+/// Only created when a verified pilot driver mapping exists.
+/// This is the stable internal representation — never tightly coupled to Samsara fields.
+///
+/// TODO: Wire into risk engine in Phase 4.
+model DriverEvent {
+  id                 String           @id @default(cuid())
+  driverId           String
+  driver             Driver           @relation(fields: [driverId], references: [id])
+  rawProviderEventId String
+  rawProviderEvent   RawProviderEvent @relation(fields: [rawProviderEventId], references: [id])
+  provider           String           // source provider (denormalized for query convenience)
+  externalDriverId   String           // external ID at event time (audit trail)
+  externalVehicleId  String?          // external vehicle ID at event time
+  type               String           // internal event type — see DriverEventType in lib/
+  severity           Float            // normalized 1–5 scale
+  timestamp          DateTime         // event time as reported by provider
+  lat                Float?
+  lng                Float?
+  createdAt          DateTime         @default(now())
+
+  @@index([driverId])
+  @@index([driverId, timestamp])
+  @@index([type])
+  @@index([provider])
 }
