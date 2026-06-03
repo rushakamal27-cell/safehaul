@@ -87,6 +87,70 @@ export function extractSamsaraMetadata(payload: SamsaraWebhookEnvelope): {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Safety Events Stream v2 types
+// ---------------------------------------------------------------------------
+// Reference: https://developers.samsara.com/reference/getsafetyeventsv2stream
+//
+// The v2 stream differs from the webhook envelope in two key ways:
+//   1. Event classification uses behaviorLabels[] (array) not a top-level eventType string.
+//   2. The event id field is always present and guaranteed unique — safe for dedup.
+
+/** One label entry within a safety event's behaviorLabels array. */
+export interface SamsaraBehaviorLabel {
+  /** Machine-readable camelCase label — maps directly to SAMSARA_TYPE_MAP keys. */
+  label: string;
+  /** "automated" | "manual" | etc. */
+  source?: string;
+  /** Human-readable display name, e.g. "Harsh Brake". */
+  name?: string;
+}
+
+/**
+ * One safety event object returned by the v2 Safety Events Stream.
+ * id is required per the Samsara schema; all other fields may be absent.
+ *
+ * TODO: Validate all field paths against a real pilot API response.
+ *       Field names match Samsara's published schema as of mid-2025.
+ */
+export interface SamsaraSafetyStreamEvent {
+  /** Unique event identifier — always present. Used as externalEventId for dedup. */
+  id: string;
+  /** Event time in RFC 3339 format. */
+  time: string;
+  /** Classification labels — first supported label becomes the DriverEventType. */
+  behaviorLabels?: SamsaraBehaviorLabel[];
+  /** "low" | "medium" | "high" | "critical" */
+  severity?: string;
+  driver?: {
+    id?: string;
+    name?: string;
+    externalIds?: Record<string, string>;
+  };
+  vehicle?: {
+    id?: string;
+    name?: string;
+    externalIds?: Record<string, string>;
+  };
+  location?: {
+    latitude?: number;
+    longitude?: number;
+    formattedAddress?: string;
+  };
+  /** Catch-all for fields we don't process but want preserved in rawPayload. */
+  [key: string]: unknown;
+}
+
+/** Top-level response envelope from the Safety Events Stream endpoint. */
+export interface SamsaraSafetyStreamResponse {
+  data: SamsaraSafetyStreamEvent[];
+  pagination: {
+    /** Opaque cursor — pass as `after` param to fetch the next page. */
+    endCursor: string;
+    hasNextPage: boolean;
+  };
+}
+
 /**
  * Extracts the provider-side deduplication ID from a Samsara payload.
  * Returns null if no ID can be found — events without IDs cannot be deduplicated.

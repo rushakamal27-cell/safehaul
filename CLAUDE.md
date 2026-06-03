@@ -1,65 +1,215 @@
-# CLAUDE.md
-
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project Identity
+# Project Identity
 
-This project is **SafeHaul** — an AI-driven National Road Safety Risk Prediction System for commercial transportation. The codebase folder is named `roadtalk-app`, but the product name is always SafeHaul.
+This project is **SafeHaul** — an AI-driven National Road Safety Risk Prediction System for commercial transportation.
 
-## Working Instructions
+The repository folder may still be named `roadtalk-app`, but the product name is always **SafeHaul**.
 
-- Read `project_context.md` before making architecture or coding decisions.
-- Act as a senior full-stack engineer and product-minded technical architect.
-- Keep code production-ready, modular, and scalable.
-- Before major changes, briefly explain the plan.
-- Do not rename existing files unless necessary.
-- All external API calls (Samsara, etc.) must go through Next.js API routes — never expose tokens to the frontend.
+SafeHaul is evolving from a Telegram Mini App MVP into a provider-neutral real-time fleet safety intelligence platform.
 
-## Dashboard Design Intent
+---
 
-- The main dashboard focuses on **Real-Time Predictive Risk**, not static compliance scoring.
-- The risk system is **rule-based first**, designed to be upgraded to XGBoost later.
-- Risk changes must be **explainable** — show contributing factors with weights (e.g., fatigue 40%, rain 30%, speeding 30%).
-- The dashboard must provide **actionable driver recommendations** based on current risk state.
+# Core Engineering Principles
 
-## Commands
+* Read `project_context.md` before making architecture or implementation decisions.
+* Act as a senior full-stack engineer and production-minded systems architect.
+* Prefer modular, scalable, provider-neutral architecture.
+* Preserve backwards compatibility whenever possible.
+* Before major architectural changes, briefly explain the plan and trade-offs.
+* Avoid tight coupling between providers and business logic.
+* Never expose external API secrets/tokens to the frontend.
+* All external integrations must go through secure server-side API routes.
+* The database is the source of truth — not the UI.
 
-```bash
-npm run dev       # Start development server
-npm run build     # Build for production
-npm run start     # Start production server
-npm run lint      # Run ESLint
-npx prisma generate          # Regenerate Prisma client after schema changes
-npx prisma db push           # Push schema changes to database
-npx prisma studio            # Open Prisma Studio GUI
+---
+
+# Architectural Philosophy
+
+SafeHaul MUST remain provider-neutral.
+
+Samsara is the first integration, not the platform identity.
+
+Future providers may include:
+
+* Motive
+* Geotab
+* Verizon Connect
+* ELD providers
+* weather providers
+* insurance telematics
+* FMCSA/public datasets
+
+Provider payloads must always be normalized into SafeHaul internal schemas before business logic executes.
+
+Preferred architecture:
+
+```txt
+Provider Webhook/API
+        ↓
+Verification Layer
+        ↓
+RawProviderEvent
+        ↓
+Normalization Layer
+        ↓
+DriverEvent
+        ↓
+Risk Engine
+        ↓
+ComplianceScore / Audit / Alerts
 ```
 
-No test framework is configured.
+---
 
-## Architecture
+# Risk Engine Philosophy
 
-SafeHaul is a Telegram WebApp-based truck driver safety platform built with Next.js 14 App Router.
+The risk engine should remain:
 
-### Application Flow
+* explainable;
+* modular;
+* auditable;
+* provider-neutral;
+* ML-ready.
 
-The app is a single-page client component (`app/page.tsx`) with tab-based navigation between three screens: Dashboard, Inspect, and Audit. A full-screen "Driving Overlay" replaces the normal UI during active driving mode. The root layout (`app/layout.tsx`) injects the Telegram WebApp SDK via a script tag.
+Rule-based logic is acceptable initially if:
 
-### Key Architectural Decisions
+* explainability is preserved;
+* factors remain transparent;
+* recommendations remain actionable.
 
-- **Telegram WebApp**: The app runs inside Telegram as a mini-app. The Telegram SDK is loaded globally in the root layout. Driver identity is derived from the Telegram user ID.
-- **Mock data**: Samsara integration is not yet implemented. Screens currently use hardcoded mock data.
-- **Prisma client**: Singleton pattern in `lib/prisma.ts` to avoid multiple instances in Next.js dev mode. The generated client lives at `lib/generated/prisma/` (gitignored).
+Risk explanations should always be understandable by:
 
-### Database (PostgreSQL via Supabase)
+* drivers;
+* fleet managers;
+* auditors;
+* regulators.
 
-Six Prisma models: `Company` → `Driver` → `Trip` → `SafetyEvent` / `Incident`, plus `ComplianceScore` (daily per-driver safety score with a `breakdownJson` field). The only working API endpoint is `app/api/driver/route.ts` (GET/POST by `telegramUserId`).
+---
 
-### Styling
+# Security Rules
 
-Dark cyberpunk/AR aesthetic using Tailwind CSS with a custom color palette (deep dark backgrounds, cyan `#00c8ff`, green `#00e87a`) and custom fonts (Exo 2, Share Tech Mono, Rajdhani). Custom keyframe animations in `globals.css` drive AR scan-line and reticle effects.
+* Never expose:
 
-### Planned Features (not yet built)
+  * SAMSARA_API_TOKEN
+  * SAMSARA_WEBHOOK_SECRET
+  * SUPABASE_SERVICE_ROLE_KEY
 
-- Samsara mock data layer and real-time risk engine (rule-based, then XGBoost)
-- Explainable risk factors and driver recommendations
-- Additional API endpoints for risk scoring and location data
+* Verify all webhook signatures.
+
+* Use timing-safe comparisons for HMAC validation.
+
+* Reject stale webhook timestamps.
+
+* Maintain webhook idempotency/deduplication.
+
+* Treat fleet telemetry as sensitive operational data.
+
+* Prefer enabling RLS on telemetry-related tables.
+
+* Use service-role access server-side only.
+
+---
+
+# Telegram Identity
+
+Driver identity currently comes from Telegram WebApp SDK.
+
+Current implementation uses:
+
+```txt
+initDataUnsafe.user
+```
+
+This is NOT production-secure yet.
+
+Future production deployment must validate Telegram initData signatures server-side before trusting user identity.
+
+---
+
+# Development Guidelines
+
+1. Keep provider-specific logic isolated:
+
+```txt
+lib/providers/{provider}/
+```
+
+2. Avoid business logic inside route handlers.
+
+3. Prefer:
+
+```txt
+route → service/helper → DB
+```
+
+4. Preserve auditability and replay capability.
+
+5. Store raw provider payloads whenever practical.
+
+6. Add TODO comments where provider assumptions are uncertain.
+
+7. Think about:
+
+* retries;
+* duplicate events;
+* stale telemetry;
+* replay attacks;
+* scaling;
+* observability;
+* future ML requirements.
+
+---
+
+# Database Philosophy
+
+* Database is the operational source of truth.
+* UI should reflect persisted operational state.
+* Avoid direct UI-driven operational logic.
+* Preserve historical telemetry whenever practical.
+
+---
+
+# UI / Product Intent
+
+Design language:
+
+* dark cyberpunk / AR-inspired;
+* operational-command-center aesthetic;
+* real-time situational awareness.
+
+The dashboard should feel:
+
+* predictive;
+* safety-critical;
+* intelligent;
+* operationally trustworthy.
+
+Avoid:
+
+* generic SaaS dashboard feel;
+* excessive visual clutter;
+* non-actionable metrics.
+
+---
+
+# Commands
+
+```bash
+npm run dev
+npm run build
+npm run start
+npm run lint
+
+npx prisma generate
+npx prisma db push
+npx prisma studio
+```
+
+Current workflow uses:
+
+```txt
+prisma db push
+```
+
+Migration-based workflow should be adopted before production-scale rollout.

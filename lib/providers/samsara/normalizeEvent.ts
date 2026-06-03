@@ -43,11 +43,15 @@ export interface NormalizedProviderEvent {
 // ---------------------------------------------------------------------------
 // Samsara → internal event type mapping
 // ---------------------------------------------------------------------------
+// Exported so the stream normalizer (normalizeStreamEvent.ts) can reuse it
+// without duplicating the mapping table.
+//
 // TODO: Validate these string values against Samsara's webhook event catalog.
 //       Samsara uses PascalCase type names in some API versions and camelCase
 //       in others. Both variants are listed here as a safety measure.
+//       The v2 Safety Events Stream uses camelCase behaviorLabels[].label values.
 //       Reference: https://developers.samsara.com/docs/safety-events
-const SAMSARA_TYPE_MAP: Readonly<Record<string, DriverEventType>> = {
+export const SAMSARA_TYPE_MAP: Readonly<Record<string, DriverEventType>> = {
   // PascalCase variants (Samsara webhook v1 observed format)
   HarshAccel:            "harsh_accel",
   HarshAcceleration:     "harsh_accel",
@@ -88,7 +92,7 @@ const SEVERITY_STRING_MAP: Readonly<Record<string, number>> = {
   critical: 5,
 };
 
-function normalizeSeverity(raw: unknown): number {
+export function normalizeSeverity(raw: unknown): number {
   if (typeof raw === "number" && isFinite(raw)) {
     // If in 0–100 range, scale to 1–5 quintiles
     if (raw >= 0 && raw <= 100) {

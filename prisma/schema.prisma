@@ -168,7 +168,7 @@ model WebhookLog {
   @@index([externalDriverId])
 }
 
-/// Parsed provider event — one row per discrete event extracted from a webhook.
+/// Parsed provider event — one row per discrete event extracted from a webhook or stream poll.
 /// Stores the raw payload for replay and links forward to normalized DriverEvent rows.
 /// Created after successful payload parse, before normalization or driver resolution.
 model RawProviderEvent {
@@ -176,7 +176,8 @@ model RawProviderEvent {
   webhookLogId    String?
   webhookLog      WebhookLog?   @relation(fields: [webhookLogId], references: [id])
   provider        String        // "samsara" | future providers
-  externalEventId String?       // provider's deduplication ID — TODO: use for idempotency
+  source          String        @default("webhook") // "webhook" | "stream"
+  externalEventId String?       // provider's deduplication ID
   rawPayload      Json          // full raw event payload from provider
   receivedAt      DateTime      @default(now())
   driverEvents    DriverEvent[]
@@ -184,8 +185,26 @@ model RawProviderEvent {
   // Unique on (provider, externalEventId) when externalEventId is non-null.
   // PostgreSQL allows multiple NULL values under a partial unique constraint,
   // so events without a provider-side ID are stored freely (no false dedup).
+  // This constraint also deduplicates events that arrive via both webhook AND stream.
   @@unique([provider, externalEventId])
+  @@index([provider, source])
   @@index([receivedAt])
+}
+
+/// Persistent cursor state for provider stream polling.
+/// One row per (provider, streamKey) pair — keyed generically so future providers
+/// (Motive, Geotab, etc.) and additional stream types share the same table.
+model ProviderSyncState {
+  id         String    @id @default(cuid())
+  provider   String    // "samsara" | future providers
+  streamKey  String    // "safety-events" | future stream identifiers
+  cursor     String?   // last endCursor from pagination; null triggers cold-start bootstrap
+  lastSyncAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@unique([provider, streamKey])
+  @@index([provider])
 }
 
 /// Provider-neutral normalized driver safety event.
