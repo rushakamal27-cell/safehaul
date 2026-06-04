@@ -127,7 +127,14 @@ Current event sources:
 * trips;
 * compliance scores;
 * safety events;
-* DriverEvents.
+* DriverEvents (real Samsara stream events — Phase 5B).
+
+DriverEvents appear with:
+
+* title: human-readable type label (e.g. "Mobile Usage", "Harsh Braking")
+* badge: severity-based (NOTICE / WARNING / HIGH ALERT)
+* detail: "Detected by Samsara onboard telematics."
+* meta: provider + channel (e.g. `Samsara · Stream`), severity, GPS flag
 
 Audit events are persisted historically and sorted by timestamp.
 

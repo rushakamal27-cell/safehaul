@@ -29,12 +29,17 @@ export async function GET(request: NextRequest) {
   }
 
   // Fetch all real event tables in parallel
-  const [incidents, safetyEvents, complianceScores, trips, inspections] = await Promise.all([
+  const [incidents, safetyEvents, complianceScores, trips, inspections, driverEventsRaw] = await Promise.all([
     prisma.incident.findMany({ where: { driverId }, orderBy: { createdAt: "desc" } }),
     prisma.safetyEvent.findMany({ where: { driverId }, orderBy: { timestamp: "desc" } }),
     prisma.complianceScore.findMany({ where: { driverId }, orderBy: { date: "desc" } }),
     prisma.trip.findMany({ where: { driverId }, orderBy: { startedAt: "desc" } }),
     prisma.inspection.findMany({ where: { driverId }, orderBy: { createdAt: "desc" } }),
+    prisma.driverEvent.findMany({
+      where: { driverId },
+      orderBy: { timestamp: "desc" },
+      include: { rawProviderEvent: { select: { source: true } } },
+    }),
   ]);
 
   // Intermediate type for unified sort before stripping timestamp
@@ -147,8 +152,42 @@ export async function GET(request: NextRequest) {
     };
   });
 
+  const driverEventItems: Stamped[] = driverEventsRaw.map((de) => {
+    const sev = Math.round(de.severity);
+    const badgeType: AuditEvent["badgeType"] =
+      sev >= 4 ? "fail" : sev === 3 ? "warn" : "info";
+    const badge = sev >= 4 ? "HIGH ALERT" : sev === 3 ? "WARNING" : "NOTICE";
+    const providerLabel =
+      de.provider.charAt(0).toUpperCase() + de.provider.slice(1); // "Samsara"
+    const sourceLabel =
+      de.rawProviderEvent?.source === "stream" ? "Stream" : "Webhook";
+    return {
+      ts: de.timestamp,
+      event: {
+        id:        de.id,
+        date:      formatAuditDate(de.timestamp),
+        badge,
+        badgeType,
+        title:     formatEventType(de.type), // "Mobile Usage", "Harsh Braking", etc.
+        detail:    `Detected by ${providerLabel} onboard telematics.`,
+        meta: [
+          `📡 ${providerLabel} · ${sourceLabel}`,
+          `⚠ Severity ${sev}/5`,
+          ...(de.lat && de.lng ? ["📍 GPS recorded"] : []),
+        ],
+      },
+    };
+  });
+
   // Merge all real events, sorted by timestamp descending
-  const allReal = [...incidentItems, ...safetyItems, ...complianceItems, ...tripItems, ...inspectionItems]
+  const allReal = [
+    ...incidentItems,
+    ...safetyItems,
+    ...complianceItems,
+    ...tripItems,
+    ...inspectionItems,
+    ...driverEventItems,
+  ]
     .sort((a, b) => b.ts.getTime() - a.ts.getTime())
     .map((s) => s.event);
 
