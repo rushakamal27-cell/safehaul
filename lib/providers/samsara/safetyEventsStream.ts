@@ -3,7 +3,7 @@
  *
  * HTTP client for the Samsara Safety Events Stream v2 API.
  *
- * GET /fleet/safety-events/stream
+ * GET /safety-events/stream
  *
  * Uses cursor-based pagination: call with afterCursor=undefined for the first
  * page (pass startTime instead), then pass pagination.endCursor on each
@@ -17,8 +17,9 @@ import type { SamsaraSafetyStreamResponse } from "./types";
 
 const SAMSARA_API_BASE = "https://api.samsara.com";
 
-// TODO: Confirm path — Samsara developer portal reference: getsafetyeventsv2stream
-const STREAM_PATH = "/fleet/safety-events/stream";
+// Verified against: https://developers.samsara.com/reference/getsafetyeventsv2stream
+// Samsara's next-gen API does NOT use the /fleet/ prefix.
+const STREAM_PATH = "/safety-events/stream";
 
 export interface FetchSafetyEventsParams {
   /** Pagination cursor from a previous response. Mutually exclusive with startTime. */

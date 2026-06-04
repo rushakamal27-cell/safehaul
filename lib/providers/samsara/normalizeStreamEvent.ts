@@ -76,14 +76,13 @@ export function normalizeSafetyStreamEvent(
     }
 
     // --- Optional fields ---
-    // TODO: Confirm vehicle ID field path against real pilot payload.
-    const externalVehicleId = event.vehicle?.id;
+    // Samsara stream uses "asset" (not "vehicle") for the vehicle/asset object.
+    const externalVehicleId = event.asset?.id;
 
     // Severity: Samsara stream uses "low" | "medium" | "high" | "critical".
     // normalizeSeverity handles these string values via SEVERITY_STRING_MAP.
     const severity = normalizeSeverity(event.severity);
 
-    // TODO: Confirm location field paths — observed as location.latitude/longitude.
     const lat =
       typeof event.location?.latitude === "number"
         ? event.location.latitude
@@ -93,6 +92,17 @@ export function normalizeSafetyStreamEvent(
         ? event.location.longitude
         : undefined;
 
+    // Samsara stream event timestamp: "startMs" field (ISO 8601 string despite the name).
+    // Falls back to "createdAtTime" if startMs is absent.
+    const rawTimestamp = event.startMs ?? event.createdAtTime;
+    if (!rawTimestamp) {
+      console.warn(
+        `[normalizeStreamEvent] Event id="${event.id}" has no startMs or createdAtTime — skipping`
+      );
+      return null;
+    }
+    const timestamp = rawTimestamp;
+
     const normalized: NormalizedProviderEvent = {
       externalDriverId,
       ...(externalVehicleId ? { externalVehicleId } : {}),
@@ -100,7 +110,7 @@ export function normalizeSafetyStreamEvent(
       externalEventId: event.id,
       type: internalType,
       severity,
-      timestamp: event.time, // RFC 3339 from Samsara
+      timestamp, // ISO 8601 from Samsara startMs
       ...(lat !== undefined ? { lat } : {}),
       ...(lng !== undefined ? { lng } : {}),
     };

@@ -110,24 +110,38 @@ export interface SamsaraBehaviorLabel {
  * One safety event object returned by the v2 Safety Events Stream.
  * id is required per the Samsara schema; all other fields may be absent.
  *
- * TODO: Validate all field paths against a real pilot API response.
- *       Field names match Samsara's published schema as of mid-2025.
+ * Field names validated against real pilot API response (2026-06-04):
+ *   - Timestamp is "startMs" (ISO 8601 string, despite the "Ms" name suffix)
+ *   - Vehicle is "asset" (not "vehicle")
+ *   - No top-level "time" field
+ *   - No top-level "severity" field (omitted by Samsara on these events)
  */
 export interface SamsaraSafetyStreamEvent {
   /** Unique event identifier — always present. Used as externalEventId for dedup. */
   id: string;
-  /** Event time in RFC 3339 format. */
-  time: string;
+  /**
+   * Event start time as ISO 8601 string.
+   * Field is named "startMs" in the Samsara API despite containing an ISO string, not ms.
+   */
+  startMs?: string;
+  /** Event end time as ISO 8601 string. */
+  endMs?: string;
+  /** ISO 8601 creation time — fallback timestamp if startMs is absent. */
+  createdAtTime?: string;
   /** Classification labels — first supported label becomes the DriverEventType. */
   behaviorLabels?: SamsaraBehaviorLabel[];
-  /** "low" | "medium" | "high" | "critical" */
+  /** "low" | "medium" | "high" | "critical" — may be absent for some event types. */
   severity?: string;
   driver?: {
     id?: string;
     name?: string;
     externalIds?: Record<string, string>;
   };
-  vehicle?: {
+  /**
+   * Asset (vehicle) object. Samsara's stream uses "asset" not "vehicle".
+   * The asset.id is the Samsara vehicle/asset identifier.
+   */
+  asset?: {
     id?: string;
     name?: string;
     externalIds?: Record<string, string>;

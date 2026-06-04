@@ -277,9 +277,18 @@ Not yet implemented:
 
 # Phase 5A: Safety Events Stream Sync
 
+## Status: VALIDATED ✓ (2026-06-04)
+
+All three gates passed:
+1. `SAMSARA_API_TOKEN` configured and verified ✓
+2. Manual sync returned HTTP 200 with real Samsara data ✓
+3. First real DriverEvents created from stream data ✓ (3 × mobile_usage for driver 53142293)
+
+Cron entry may now be re-added to `vercel.json` (requires Vercel Pro plan).
+
 ## Purpose
 
-The Samsara Safety Events Stream API (`GET /fleet/safety-events/stream`) is the
+The Samsara Safety Events Stream API (`GET /safety-events/stream`) is the
 authoritative source for harsh_braking, mobile_usage, inattentive_driving, and
 harsh_turn events. Phase 5A adds a cron-triggered poller alongside the existing
 webhook pipeline.
@@ -329,38 +338,54 @@ ProviderSyncState cursor update
 
 ## Environment variables — current status
 
-Manual stream sync is blocked until both of the following are configured:
+Both are configured. Validation complete.
 
 ### SAMSARA_API_TOKEN
 
-**Required. Not yet configured locally. Vercel status unknown.**
+**Configured locally (.env.local) and verified against real Samsara org.**
 
-The token must have **Read Safety Events & Scores** permission (Safety & Cameras
-category in the Samsara token settings). Obtain from the Samsara dashboard and
-add to `.env.local` for local testing and to Vercel Environment Variables for
-the deployed app.
+Token requires **Read Safety Events & Scores** permission (Safety & Cameras
+category). Must also be added to Vercel Environment Variables for deployment.
 
 ### CRON_SECRET
 
-**Required. Not yet configured anywhere.**
-
-Generate any strong random string. Used to protect the sync endpoint from
-unauthorised callers. Add to `.env.local` for local testing and to Vercel
-Environment Variables for deployment. Vercel Cron will inject it automatically
-as `Authorization: Bearer $CRON_SECRET` once the cron entry is re-added.
+**Configured locally (.env.local).** Must also be added to Vercel Environment
+Variables. Vercel Cron injects it automatically as `Authorization: Bearer
+$CRON_SECRET` once the cron entry is restored.
 
 ---
 
-## Cron entry — intentionally absent from vercel.json
+## Validated Samsara stream payload fields (2026-06-04)
 
-The `*/5 * * * *` cron entry has been removed from `vercel.json` until the
-following gates are cleared:
+Real Samsara Safety Events Stream events use these field names (different from docs):
 
-1. `SAMSARA_API_TOKEN` is configured and verified against the real Samsara org
-2. First successful manual sync (GET /api/sync/samsara-safety-events with CRON_SECRET)
-3. First real DriverEvent created from stream data
+* Timestamp: `startMs` — an ISO 8601 string (NOT milliseconds, despite the name)
+* Fallback timestamp: `createdAtTime` (also ISO 8601)
+* Vehicle/asset: `asset.id` — NOT `vehicle.id`
+* Driver: `driver.id` — correct
+* Behavior labels: `behaviorLabels[].label` — PascalCase (e.g. `"MobileUsage"`)
+* Severity: absent on mobile_usage events (defaults to 3)
+* Location: `location.latitude` / `location.longitude` — correct
 
-Re-add the entry only after all three gates pass.
+These are verified against 3 real MobileUsage events for driver 53142293.
+
+---
+
+## Cron entry — ready to restore
+
+All three gates have cleared. Re-add to `vercel.json`:
+
+```json
+{
+  "crons": [
+    {
+      "path": "/api/sync/samsara-safety-events",
+      "schedule": "*/5 * * * *"
+    }
+  ]
+}
+```
+
 Requires Vercel Pro plan for `*/5 * * * *` frequency.
 
 ## New files
