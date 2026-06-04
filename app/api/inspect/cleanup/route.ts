@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { removeInspectionPhotos } from "@/lib/supabaseStorage";
 
+// This route queries the DB at request time — must not be prerendered.
+export const dynamic = "force-dynamic";
+
 /**
  * GET /api/inspect/cleanup
  *
