@@ -4,11 +4,40 @@ import { RiskInput, RiskOutput } from "@/lib/riskEngine";
 import { useTelegram } from "@/lib/useTelegram";
 import type { DriverLocation } from "@/lib/location";
 
+interface LiveData {
+  provider: string;
+  lastEventType: string | null;
+  lastEventTimestamp: string | null;
+  lastSyncTime: string | null;
+  driverEventCount24h: number;
+}
+
 interface RiskResponse {
   driverId: string;
   timestamp: string;
+  dataSource: "real" | "mock";
+  liveData: LiveData | null;
   input: RiskInput;
   result: RiskOutput;
+}
+
+const PROVIDER_LABELS: Record<string, string> = {
+  samsara: "Samsara",
+  motive:  "Motive",
+  geotab:  "Geotab",
+};
+
+function formatEventType(type: string): string {
+  return type.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
+
+function formatTs(iso: string): string {
+  const d = new Date(iso);
+  return d.toLocaleString("en-US", {
+    month: "short", day: "numeric", year: "numeric",
+    hour: "2-digit", minute: "2-digit",
+    timeZoneName: "short",
+  });
 }
 
 const LEVEL_STYLES: Record<string, { color: string; bg: string; border: string }> = {
@@ -199,6 +228,64 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
           </>
         )}
       </div>
+
+      {/* ── Live Data Source ── */}
+      {riskData && (
+        <div
+          className="rounded-xl p-[12px_14px] mb-3"
+          style={{ background: "var(--bg-card)", border: "1px solid var(--border)" }}
+        >
+          <div className="flex items-center justify-between mb-[8px]">
+            <span className="font-mono text-[9px] tracking-[2px] uppercase" style={{ color: "var(--text-secondary)" }}>
+              Data Source
+            </span>
+            {riskData.dataSource === "real" ? (
+              <span
+                className="font-mono text-[9px] tracking-[1px] px-2 py-[2px] rounded-full font-bold"
+                style={{ background: "rgba(0,232,122,0.12)", color: "var(--green)", border: "1px solid rgba(0,232,122,0.3)" }}
+              >
+                ● REAL DATA
+              </span>
+            ) : (
+              <span
+                className="font-mono text-[9px] tracking-[1px] px-2 py-[2px] rounded-full"
+                style={{ background: "rgba(255,255,255,0.05)", color: "var(--text-secondary)", border: "1px solid var(--border)" }}
+              >
+                ◌ DEMO DATA
+              </span>
+            )}
+          </div>
+
+          {riskData.dataSource === "real" && riskData.liveData ? (
+            <>
+              <p className="font-mono text-[10px] mb-[8px]" style={{ color: "var(--cyan)" }}>
+                {PROVIDER_LABELS[riskData.liveData.provider] ?? riskData.liveData.provider} Stream Active
+              </p>
+              <div className="flex flex-col gap-[5px]">
+                {(
+                  [
+                    ["Last Event",    riskData.liveData.lastEventType ? formatEventType(riskData.liveData.lastEventType) : "Clean Window"],
+                    ["Event Time",    riskData.liveData.lastEventTimestamp ? formatTs(riskData.liveData.lastEventTimestamp) : "—"],
+                    ["Last Sync",     riskData.liveData.lastSyncTime ? formatTs(riskData.liveData.lastSyncTime) : "—"],
+                    ["Events (24h)",  String(riskData.liveData.driverEventCount24h)],
+                  ] as [string, string][]
+                ).map(([label, value]) => (
+                  <div key={label} className="flex items-baseline gap-2">
+                    <span className="font-mono text-[9px] w-[70px] shrink-0" style={{ color: "var(--text-secondary)" }}>{label}</span>
+                    <span className="font-mono text-[10px]" style={{ color: "var(--text-primary)" }}>{value}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            riskData.dataSource === "mock" && (
+              <p className="font-mono text-[10px]" style={{ color: "var(--text-secondary)" }}>
+                Simulated telematics scenario
+              </p>
+            )
+          )}
+        </div>
+      )}
 
       {/* ── Incident Protocol ── */}
       <button

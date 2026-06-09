@@ -27,9 +27,36 @@ export async function GET(request: NextRequest) {
   // Hybrid input: pilot drivers get real DriverEvent rows; non-pilots keep mock scenario.
   // For pilot drivers, real events fully replace the mock safetyEvents array.
   // An empty real-events array means the pilot has a clean window — score reflects that.
+  let liveData: {
+    provider: string;
+    lastEventType: string | null;
+    lastEventTimestamp: string | null;
+    lastSyncTime: string | null;
+    driverEventCount24h: number;
+  } | null = null;
+
   if (pilotDriver) {
-    const realEvents = await getRecentDriverEvents(driverId);
+    const [realEvents, mapping, syncState] = await Promise.all([
+      getRecentDriverEvents(driverId),
+      prisma.driverProviderMapping.findFirst({
+        where: { driverId, isPilot: true, isActive: true },
+        select: { provider: true },
+      }),
+      prisma.providerSyncState.findFirst({
+        where: { provider: "samsara", streamKey: "safety-events" },
+        select: { lastSyncAt: true },
+      }),
+    ]);
+
     input.safetyEvents = driverEventsToRiskSafetyEvents(realEvents);
+
+    liveData = {
+      provider: mapping?.provider ?? "samsara",
+      lastEventType: realEvents[0]?.type ?? null,
+      lastEventTimestamp: realEvents[0]?.timestamp.toISOString() ?? null,
+      lastSyncTime: syncState?.lastSyncAt?.toISOString() ?? null,
+      driverEventCount24h: realEvents.length,
+    };
   }
 
   const result = calculateRisk(input);
@@ -98,8 +125,9 @@ export async function GET(request: NextRequest) {
 
   return NextResponse.json({
     driverId,
-    timestamp:   new Date().toISOString(),
-    dataSource:  pilotDriver ? "real" : "mock",
+    timestamp:  new Date().toISOString(),
+    dataSource: pilotDriver ? "real" : "mock",
+    liveData,
     input,
     result,
   });
