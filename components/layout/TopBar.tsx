@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 interface TopBarProps {
   isDriving: boolean;
@@ -7,15 +7,52 @@ interface TopBarProps {
 
 export function TopBar({ isDriving, onToggleDriving }: TopBarProps) {
   return (
-    <header className="flex items-center justify-between px-[18px] py-[14px] border-b sticky top-0 z-[100] backdrop-blur-md" style={{ borderColor: "var(--border)", background: "rgba(8,12,16,0.95)" }}>
-      <div className="font-display font-black text-xl tracking-[2px]" style={{ color: "var(--cyan)", textShadow: "0 0 18px var(--cyan-glow)" }}>
-        SAFE<span style={{ color: "var(--text-primary)" }}>HAUL</span>
-      </div>
-      <div className="flex gap-[6px] items-center">
-        <div className="font-mono text-[10px] px-2 py-[3px] rounded-full" style={{ background: "var(--green-dim)", color: "var(--green)", border: "1px solid rgba(0,232,122,0.3)" }}>● GPS</div>
-        <div className="font-mono text-[10px] px-2 py-[3px] rounded-full" style={{ background: "var(--cyan-dim)", color: "var(--cyan)", border: "1px solid rgba(0,200,255,0.3)" }}>V2X</div>
+    <header
+      className="flex items-center justify-between px-5 sticky top-0 z-[100]"
+      style={{
+        height: 56,
+        background: "rgba(8, 16, 24, 0.92)",
+        borderBottom: "1px solid var(--border)",
+        backdropFilter: "blur(20px)",
+        WebkitBackdropFilter: "blur(20px)",
+      }}
+    >
+      {/* Wordmark */}
+      <span
+        style={{
+          fontFamily: "Inter, system-ui, sans-serif",
+          fontWeight: 700,
+          fontSize: 17,
+          letterSpacing: "-0.4px",
+          color: "var(--text-primary)",
+        }}
+      >
+        Safe<span style={{ color: "var(--blue)" }}>Haul</span>
+      </span>
+
+      {/* GPS status */}
+      <div className="flex items-center gap-2">
+        <div
+          className="dot-pulse"
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: "50%",
+            background: "var(--green)",
+            flexShrink: 0,
+          }}
+        />
+        <span
+          style={{
+            fontFamily: "Inter, system-ui, sans-serif",
+            fontWeight: 500,
+            fontSize: 12,
+            color: "var(--text-secondary)",
+          }}
+        >
+          GPS Active
+        </span>
       </div>
     </header>
   );
 }
-

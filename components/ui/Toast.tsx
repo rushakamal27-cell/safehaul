@@ -1,10 +1,36 @@
-﻿"use client";
+"use client";
 
-interface ToastProps { message: string; visible: boolean; }
+interface ToastProps {
+  message: string;
+  visible: boolean;
+}
 
 export function Toast({ message, visible }: ToastProps) {
   return (
-    <div className="fixed z-[300] left-1/2 -translate-x-1/2 font-mono text-[11px] px-5 py-[10px] rounded-[30px] pointer-events-none whitespace-nowrap transition-opacity duration-300" style={{ bottom: "90px", background: "var(--bg-card)", border: "1px solid var(--green)", color: "var(--green)", boxShadow: "0 0 20px rgba(0,232,122,0.3)", opacity: visible ? 1 : 0 }}>
+    <div
+      style={{
+        position: "fixed",
+        bottom: 88,
+        left: "50%",
+        transform: "translateX(-50%)",
+        zIndex: 300,
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "10px 18px",
+        borderRadius: 99,
+        background: "var(--card)",
+        border: "1px solid var(--border-strong)",
+        color: "var(--text-primary)",
+        fontSize: 13,
+        fontWeight: 500,
+        whiteSpace: "nowrap",
+        pointerEvents: "none",
+        boxShadow: "0 4px 24px rgba(0,0,0,0.5)",
+        opacity: visible ? 1 : 0,
+        transition: "opacity 0.2s ease",
+      }}
+    >
       {message}
     </div>
   );

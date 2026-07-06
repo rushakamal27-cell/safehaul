@@ -1,8 +1,15 @@
 "use client";
+
 import { useEffect, useState } from "react";
 import { RiskInput, RiskOutput } from "@/lib/riskEngine";
 import { useTelegram } from "@/lib/useTelegram";
 import type { DriverLocation } from "@/lib/location";
+import {
+  Cloud, Moon, Gauge, MapPin, Smartphone, AlertTriangle,
+  Wrench, Info, ChevronRight, TriangleAlert,
+} from "lucide-react";
+
+// ── Types (unchanged) ──────────────────────────────────────────────────────────
 
 interface LiveData {
   provider: string;
@@ -21,6 +28,17 @@ interface RiskResponse {
   result: RiskOutput;
 }
 
+// ── Design helpers ─────────────────────────────────────────────────────────────
+
+const LEVEL_CONFIG: Record<string, {
+  color: string; label: string; bg: string; border: string;
+}> = {
+  LOW:      { color: "var(--green)",   label: "Low Risk",      bg: "var(--green-dim)",   border: "var(--green-border)"   },
+  MEDIUM:   { color: "var(--warning)", label: "Medium Risk",   bg: "var(--warning-dim)", border: "var(--warning-border)" },
+  HIGH:     { color: "var(--warning)", label: "High Risk",     bg: "var(--warning-dim)", border: "var(--warning-border)" },
+  CRITICAL: { color: "var(--red)",     label: "Critical Risk", bg: "var(--red-dim)",     border: "var(--red-border)"     },
+};
+
 const PROVIDER_LABELS: Record<string, string> = {
   samsara: "Samsara",
   motive:  "Motive",
@@ -32,42 +50,83 @@ function formatEventType(type: string): string {
 }
 
 function formatTs(iso: string): string {
-  const d = new Date(iso);
-  return d.toLocaleString("en-US", {
-    month: "short", day: "numeric", year: "numeric",
+  return new Date(iso).toLocaleString("en-US", {
+    month: "short", day: "numeric",
     hour: "2-digit", minute: "2-digit",
-    timeZoneName: "short",
   });
 }
 
-const LEVEL_STYLES: Record<string, { color: string; bg: string; border: string }> = {
-  LOW:      { color: "var(--green)",  bg: "rgba(0,232,122,0.1)",  border: "rgba(0,232,122,0.3)"  },
-  MEDIUM:   { color: "var(--yellow)", bg: "rgba(255,214,0,0.1)",  border: "rgba(255,214,0,0.3)"  },
-  HIGH:     { color: "var(--orange)", bg: "rgba(255,140,0,0.1)",  border: "rgba(255,140,0,0.3)"  },
-  CRITICAL: { color: "var(--red)",    bg: "rgba(255,60,60,0.1)",  border: "rgba(255,60,60,0.3)"  },
-};
+function getGreeting(): string {
+  const h = new Date().getHours();
+  if (h < 12) return "Good morning";
+  if (h < 18) return "Good afternoon";
+  return "Good evening";
+}
+
+// Map a recommendation string → icon + title
+const ICON_PROPS = { size: 16, strokeWidth: 1.75 };
+
+function parseRecommendation(rec: string): {
+  icon: React.ReactNode;
+  title: string;
+  description: string;
+} {
+  const lower = rec.toLowerCase();
+  if (lower.includes("rest") || lower.includes("break") || lower.includes("fatigue")) {
+    return { icon: <Moon {...ICON_PROPS} />, title: "Fatigue", description: rec };
+  }
+  if (lower.includes("weather") || lower.includes("caution") || lower.includes("condition")) {
+    return { icon: <Cloud {...ICON_PROPS} />, title: "Weather", description: rec };
+  }
+  if (lower.includes("speed") || lower.includes("following distance")) {
+    return { icon: <Gauge {...ICON_PROPS} />, title: "Speed", description: rec };
+  }
+  if (lower.includes("zone") || lower.includes("area")) {
+    return { icon: <MapPin {...ICON_PROPS} />, title: "Zone Alert", description: rec };
+  }
+  if (lower.includes("phone") || lower.includes("distract")) {
+    return { icon: <Smartphone {...ICON_PROPS} />, title: "Distraction", description: rec };
+  }
+  if (lower.includes("brake") || lower.includes("stop")) {
+    return { icon: <AlertTriangle {...ICON_PROPS} />, title: "Braking", description: rec };
+  }
+  if (lower.includes("pull over") || lower.includes("power loss") || lower.includes("inspect")) {
+    return { icon: <Wrench {...ICON_PROPS} />, title: "Vehicle", description: rec };
+  }
+  if (lower.includes("smooth") || lower.includes("accel") || lower.includes("maneuver")) {
+    return { icon: <Gauge {...ICON_PROPS} />, title: "Driving Style", description: rec };
+  }
+  return { icon: <Info {...ICON_PROPS} />, title: "Advisory", description: rec };
+}
+
+// ── Skeleton loading block ─────────────────────────────────────────────────────
+function SkeletonBlock({ height, radius = 12 }: { height: number; radius?: number }) {
+  return (
+    <div className="skeleton" style={{ height, borderRadius: radius }} />
+  );
+}
+
+// ── Main component ─────────────────────────────────────────────────────────────
 
 export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
   const telegramUser = useTelegram();
 
-  const [riskData, setRiskData]         = useState<RiskResponse | null>(null);
-  const [location, setLocation]         = useState<DriverLocation | null>(null);
-  const [loading, setLoading]           = useState(true);
-  const [error, setError]               = useState<string | null>(null);
-  const [driverId, setDriverId]         = useState<string | null>(null);
+  const [riskData,         setRiskData]         = useState<RiskResponse | null>(null);
+  const [location,         setLocation]         = useState<DriverLocation | null>(null);
+  const [loading,          setLoading]          = useState(true);
+  const [error,            setError]            = useState<string | null>(null);
+  const [driverId,         setDriverId]         = useState<string | null>(null);
   const [showIncidentForm, setShowIncidentForm] = useState(false);
-  const [incidentText, setIncidentText] = useState("");
-  const [submitting, setSubmitting]     = useState(false);
+  const [incidentText,     setIncidentText]     = useState("");
+  const [submitting,       setSubmitting]       = useState(false);
 
+  // ── Data loading (unchanged) ─────────────────────────────────────────────────
   useEffect(() => {
-    // Wait until Telegram identity is resolved
     if (!telegramUser) return;
-
     let cancelled = false;
 
     async function loadRisk() {
       try {
-        // Step 1: resolve or create driver via telegramUserId
         const driverRes = await fetch("/api/driver", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -76,17 +135,14 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
             name: telegramUser!.firstName,
           }),
         });
-
         if (!driverRes.ok) throw new Error(`Driver API failed: ${driverRes.status}`);
         const { driver } = await driverRes.json();
         if (!cancelled) setDriverId(driver.id);
 
-        // Step 2: fetch risk and location in parallel
         const [riskRes, locationRes] = await Promise.all([
           fetch(`/api/risk?driverId=${driver.id}`),
           fetch(`/api/location?driverId=${driver.id}`),
         ]);
-
         if (!riskRes.ok) throw new Error(`Risk API failed: ${riskRes.status}`);
         const riskData: RiskResponse = await riskRes.json();
 
@@ -107,6 +163,7 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
     return () => { cancelled = true; };
   }, [telegramUser]);
 
+  // ── Incident submission (unchanged) ──────────────────────────────────────────
   async function submitIncident() {
     if (!driverId) return;
     setSubmitting(true);
@@ -128,221 +185,407 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
     }
   }
 
-  const result = riskData?.result;
-  const levelStyle = result ? (LEVEL_STYLES[result.level] ?? LEVEL_STYLES.HIGH) : null;
+  const result      = riskData?.result;
+  const levelConfig = result ? (LEVEL_CONFIG[result.level] ?? LEVEL_CONFIG.HIGH) : null;
+  const parsedRecs  = result?.recommendations.map(parseRecommendation) ?? [];
 
+  // ── Render ────────────────────────────────────────────────────────────────────
   return (
-    <div className="animate-fade-in">
-      {/* ── Greeting ── */}
-      {telegramUser && (
-        <p className="font-mono text-[12px] mb-[14px]" style={{ color: "var(--text-primary)" }}>
-          {telegramUser.firstName
-            ? `Hello, ${telegramUser.firstName}!`
-            : telegramUser.username
-            ? `Hello, @${telegramUser.username}!`
-            : "Hello, Driver!"}
-        </p>
-      )}
+    <div className="animate-fade-in flex flex-col" style={{ gap: 24, padding: "24px 20px 8px" }}>
 
-      {/* ── Real-Time Predictive Risk Card ── */}
-      <p className="font-mono text-[10px] tracking-[2px] uppercase mb-[10px]" style={{ color: "var(--text-secondary)" }}>
-        Real-Time Predictive Risk
-      </p>
+      {/* ── 1. Greeting ─────────────────────────────────────────────────────── */}
+      <div>
+        <div style={{ fontSize: 24, fontWeight: 600, color: "var(--text-primary)", letterSpacing: "-0.5px", lineHeight: 1.2 }}>
+          {getGreeting()}{telegramUser?.firstName ? `, ${telegramUser.firstName}` : ""}.
+        </div>
+        <div style={{ fontSize: 14, color: "var(--text-secondary)", marginTop: 4 }}>
+          Drive safely today.
+        </div>
+      </div>
+
+      {/* ── 2. Risk Card ────────────────────────────────────────────────────── */}
       <div
-        className="flex flex-col items-center rounded-2xl p-6 mb-4 relative overflow-hidden"
         style={{
-          background: "linear-gradient(145deg,var(--bg-panel),var(--bg-card))",
-          border: `1px solid ${levelStyle?.border ?? "var(--border-bright)"}`,
+          background: "var(--card)",
+          border: "1px solid var(--border)",
+          borderRadius: 20,
+          padding: "24px",
         }}
       >
-        <div className="absolute top-0 left-0 right-0 h-[2px]" style={{ background: "linear-gradient(90deg,transparent,var(--cyan),transparent)" }} />
-        <p className="font-mono text-[10px] tracking-[3px] mb-4" style={{ color: "var(--text-secondary)" }}>
-          PREDICTIVE RISK ENGINE · LIVE
-        </p>
+        {/* Header label */}
+        <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-tertiary)", letterSpacing: "0.6px", textTransform: "uppercase", marginBottom: 16 }}>
+          Real-time predictive risk
+        </div>
 
         {loading && (
-          <div className="w-full flex flex-col items-center gap-3 py-4">
-            <div className="w-[72px] h-[72px] rounded-full animate-pulse" style={{ background: "var(--bg-card)", border: "1px solid var(--border-bright)" }} />
-            <div className="w-32 h-3 rounded animate-pulse" style={{ background: "var(--bg-card)" }} />
-            <div className="w-24 h-3 rounded animate-pulse" style={{ background: "var(--bg-card)" }} />
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <SkeletonBlock height={72} radius={12} />
+            <SkeletonBlock height={16} radius={8} />
+            <SkeletonBlock height={48} radius={8} />
           </div>
         )}
 
         {error && (
-          <p className="font-mono text-[11px] text-center py-4" style={{ color: "var(--red)" }}>
-            Failed to load risk data
-          </p>
+          <div style={{ fontSize: 13, color: "var(--red)", textAlign: "center", padding: "12px 0" }}>
+            Failed to load risk data. Please try again.
+          </div>
         )}
 
-        {result && levelStyle && (
+        {result && levelConfig && (
           <>
-            {/* Score */}
-            <div className="font-display font-black text-[64px] leading-none mb-1" style={{ color: levelStyle.color, textShadow: `0 0 24px ${levelStyle.color}` }}>
-              {result.score}
+            {/* Score + badge row */}
+            <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", marginBottom: 8 }}>
+              <div
+                style={{
+                  fontSize: 72,
+                  fontWeight: 700,
+                  color: levelConfig.color,
+                  letterSpacing: "-3px",
+                  lineHeight: 1,
+                  fontVariantNumeric: "tabular-nums",
+                  fontFamily: "Inter, system-ui, sans-serif",
+                }}
+              >
+                {result.score}
+              </div>
+              <div
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  background: levelConfig.bg,
+                  border: `1px solid ${levelConfig.border}`,
+                  borderRadius: 99,
+                  padding: "5px 12px",
+                  marginBottom: 8,
+                }}
+              >
+                <div
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: "50%",
+                    background: levelConfig.color,
+                    flexShrink: 0,
+                  }}
+                />
+                <span style={{ fontSize: 11, fontWeight: 600, color: levelConfig.color, letterSpacing: "0.4px", textTransform: "uppercase" }}>
+                  {levelConfig.label}
+                </span>
+              </div>
             </div>
 
-            {/* Level badge */}
-            <span
-              className="font-mono text-[11px] tracking-[3px] px-3 py-[4px] rounded-full mb-5"
-              style={{ color: levelStyle.color, background: levelStyle.bg, border: `1px solid ${levelStyle.border}` }}
-            >
-              ● {result.level}
-            </span>
-
-            {/* Top Risk Drivers */}
+            {/* Risk factors */}
             {result.factors.length > 0 && (
-              <div className="w-full mb-4">
-                <p className="font-mono text-[9px] tracking-[2px] uppercase mb-2" style={{ color: "var(--text-secondary)" }}>
-                  Primary Risk Factors
-                </p>
-                <div className="flex flex-col gap-[6px]">
+              <>
+                <div style={{ height: 1, background: "var(--border)", margin: "20px 0 16px" }} />
+                <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-tertiary)", letterSpacing: "0.6px", textTransform: "uppercase", marginBottom: 14 }}>
+                  Primary risk factors
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                   {result.factors.slice(0, 3).map((f) => (
-                    <div key={f.name} className="flex items-center gap-2">
-                      <span className="font-mono text-[11px] flex-1" style={{ color: "var(--text-primary)" }}>{f.name}</span>
-                      <div className="flex-1 h-[4px] rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.07)" }}>
-                        <div className="h-full rounded-full" style={{ width: `${f.impact}%`, background: levelStyle.color, opacity: 0.85 }} />
+                    <div key={f.name}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+                        <span style={{ fontSize: 13, fontWeight: 500, color: "var(--text-primary)" }}>{f.name}</span>
+                        <span style={{ fontSize: 12, color: "var(--text-secondary)", fontFamily: "JetBrains Mono, monospace" }}>{f.impact}%</span>
                       </div>
-                      <span className="font-mono text-[11px] w-[34px] text-right" style={{ color: levelStyle.color }}>{f.impact}%</span>
+                      <div style={{ height: 3, borderRadius: 99, background: "var(--border)", overflow: "hidden" }}>
+                        <div
+                          style={{
+                            height: "100%",
+                            width: `${f.impact}%`,
+                            borderRadius: 99,
+                            background: levelConfig.color,
+                            transition: "width 0.9s cubic-bezier(0.4,0,0.2,1)",
+                          }}
+                        />
+                      </div>
                     </div>
                   ))}
                 </div>
-              </div>
+              </>
             )}
 
-            {/* Recommended Actions */}
-            {result.recommendations.length > 0 && (
-              <div className="w-full">
-                <p className="font-mono text-[9px] tracking-[2px] uppercase mb-2" style={{ color: "var(--text-secondary)" }}>
-                  Recommended Actions
-                </p>
-                <div className="flex flex-col gap-[6px]">
-                  {result.recommendations.slice(0, 3).map((rec) => (
-                    <div key={rec} className="flex items-start gap-2 rounded-lg px-3 py-[8px]" style={{ background: "rgba(0,200,255,0.05)", border: "1px solid rgba(0,200,255,0.12)" }}>
-                      <span style={{ color: "var(--cyan)" }}>›</span>
-                      <span className="text-[12px] leading-snug" style={{ color: "var(--text-primary)" }}>{rec}</span>
-                    </div>
-                  ))}
-                </div>
+            {/* Live data footer */}
+            {riskData && (
+              <div
+                style={{
+                  marginTop: 20,
+                  paddingTop: 16,
+                  borderTop: "1px solid var(--border)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                }}
+              >
+                {riskData.dataSource === "real" && riskData.liveData ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <div className="dot-pulse" style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--green)", flexShrink: 0 }} />
+                    <span style={{ fontSize: 12, fontWeight: 500, color: "var(--green)" }}>
+                      Live · {PROVIDER_LABELS[riskData.liveData.provider] ?? riskData.liveData.provider}
+                    </span>
+                  </div>
+                ) : (
+                  <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>Demo mode</span>
+                )}
+                {riskData.dataSource === "real" && riskData.liveData && riskData.liveData.driverEventCount24h > 0 && (
+                  <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+                    {riskData.liveData.driverEventCount24h} event{riskData.liveData.driverEventCount24h !== 1 ? "s" : ""} · 24h
+                  </span>
+                )}
               </div>
             )}
           </>
         )}
       </div>
 
-      {/* ── Live Data Source ── */}
-      {riskData && (
+      {/* Live data detail row — only for real pilot data */}
+      {riskData?.dataSource === "real" && riskData.liveData && riskData.liveData.lastEventType && (
         <div
-          className="rounded-xl p-[12px_14px] mb-3"
-          style={{ background: "var(--bg-card)", border: "1px solid var(--border)" }}
+          style={{
+            background: "var(--card)",
+            border: "1px solid var(--border)",
+            borderRadius: 16,
+            padding: "14px 18px",
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            gap: "10px 16px",
+          }}
         >
-          <div className="flex items-center justify-between mb-[8px]">
-            <span className="font-mono text-[9px] tracking-[2px] uppercase" style={{ color: "var(--text-secondary)" }}>
-              Data Source
-            </span>
-            {riskData.dataSource === "real" ? (
-              <span
-                className="font-mono text-[9px] tracking-[1px] px-2 py-[2px] rounded-full font-bold"
-                style={{ background: "rgba(0,232,122,0.12)", color: "var(--green)", border: "1px solid rgba(0,232,122,0.3)" }}
-              >
-                ● REAL DATA
-              </span>
-            ) : (
-              <span
-                className="font-mono text-[9px] tracking-[1px] px-2 py-[2px] rounded-full"
-                style={{ background: "rgba(255,255,255,0.05)", color: "var(--text-secondary)", border: "1px solid var(--border)" }}
-              >
-                ◌ DEMO DATA
-              </span>
-            )}
-          </div>
-
-          {riskData.dataSource === "real" && riskData.liveData ? (
-            <>
-              <p className="font-mono text-[10px] mb-[8px]" style={{ color: "var(--cyan)" }}>
-                {PROVIDER_LABELS[riskData.liveData.provider] ?? riskData.liveData.provider} Stream Active
-              </p>
-              <div className="flex flex-col gap-[5px]">
-                {(
-                  [
-                    ["Last Event",    riskData.liveData.lastEventType ? formatEventType(riskData.liveData.lastEventType) : "Clean Window"],
-                    ["Event Time",    riskData.liveData.lastEventTimestamp ? formatTs(riskData.liveData.lastEventTimestamp) : "—"],
-                    ["Last Sync",     riskData.liveData.lastSyncTime ? formatTs(riskData.liveData.lastSyncTime) : "—"],
-                    ["Events (24h)",  String(riskData.liveData.driverEventCount24h)],
-                  ] as [string, string][]
-                ).map(([label, value]) => (
-                  <div key={label} className="flex items-baseline gap-2">
-                    <span className="font-mono text-[9px] w-[70px] shrink-0" style={{ color: "var(--text-secondary)" }}>{label}</span>
-                    <span className="font-mono text-[10px]" style={{ color: "var(--text-primary)" }}>{value}</span>
-                  </div>
-                ))}
+          {[
+            ["Last event",   formatEventType(riskData.liveData.lastEventType)],
+            ["Event time",   riskData.liveData.lastEventTimestamp ? formatTs(riskData.liveData.lastEventTimestamp) : "—"],
+            ["Last sync",    riskData.liveData.lastSyncTime ? formatTs(riskData.liveData.lastSyncTime) : "—"],
+            ["Events (24h)", String(riskData.liveData.driverEventCount24h)],
+          ].map(([label, value]) => (
+            <div key={label}>
+              <div style={{ fontSize: 10, fontWeight: 500, color: "var(--text-tertiary)", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 3 }}>
+                {label}
               </div>
-            </>
-          ) : (
-            riskData.dataSource === "mock" && (
-              <p className="font-mono text-[10px]" style={{ color: "var(--text-secondary)" }}>
-                Simulated telematics scenario
-              </p>
-            )
-          )}
+              <div style={{ fontSize: 13, fontWeight: 500, color: "var(--text-primary)" }}>{value}</div>
+            </div>
+          ))}
         </div>
       )}
 
-      {/* ── Incident Protocol ── */}
-      <button
-        onClick={() => driverId ? setShowIncidentForm(true) : onIncident()}
-        className="w-full p-[18px] rounded-2xl mb-3 relative overflow-hidden flex items-center justify-center gap-[10px] font-display font-black text-[17px] tracking-[3px] uppercase cursor-pointer incident-hatch"
-        style={{ background: "linear-gradient(135deg,#3a0808,#250505)", border: "2px solid var(--red)", color: "var(--red)", boxShadow: "0 0 20px rgba(255,60,60,0.2)" }}
-      >
-        <span className="text-[22px]">⚡</span>INITIATE INCIDENT PROTOCOL
-      </button>
+      {/* ── 3. Incident Protocol ─────────────────────────────────────────────── */}
+      <div>
+        <button
+          onClick={() => driverId ? setShowIncidentForm(true) : onIncident()}
+          style={{
+            width: "100%",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 10,
+            background: "rgba(255, 74, 74, 0.06)",
+            border: "1px solid rgba(255, 74, 74, 0.28)",
+            borderRadius: 16,
+            padding: "17px 24px",
+            color: "var(--red)",
+            fontSize: 15,
+            fontWeight: 600,
+            letterSpacing: "0.2px",
+            cursor: "pointer",
+            transition: "background 0.15s ease",
+          }}
+        >
+          <TriangleAlert size={18} strokeWidth={1.75} />
+          Initiate Incident Protocol
+        </button>
 
-      {showIncidentForm && (
-        <div className="rounded-2xl p-4 mb-4" style={{ background: "var(--bg-card)", border: "1px solid var(--red)" }}>
-          <p className="font-mono text-[10px] tracking-[2px] uppercase mb-2" style={{ color: "var(--red)" }}>
-            Incident Description
-          </p>
-          <textarea
-            value={incidentText}
-            onChange={(e) => setIncidentText(e.target.value)}
-            placeholder="Briefly describe what happened..."
-            rows={3}
-            className="w-full rounded-lg p-2 text-[13px] font-mono resize-none outline-none"
-            style={{ background: "var(--bg-deep)", border: "1px solid var(--border-bright)", color: "var(--text-primary)" }}
-          />
-          <div className="flex gap-2 mt-3">
-            <button
-              onClick={submitIncident}
-              disabled={submitting}
-              className="flex-1 py-[10px] rounded-lg font-display font-bold text-[13px] tracking-[2px] uppercase"
-              style={{ background: "var(--red)", color: "#fff", opacity: submitting ? 0.6 : 1 }}
-            >
-              {submitting ? "SUBMITTING..." : "SUBMIT REPORT"}
-            </button>
-            <button
-              onClick={() => { setShowIncidentForm(false); setIncidentText(""); }}
-              className="px-4 py-[10px] rounded-lg font-mono text-[12px]"
-              style={{ border: "1px solid var(--border)", color: "var(--text-secondary)" }}
-            >
-              CANCEL
-            </button>
+        {showIncidentForm && (
+          <div
+            style={{
+              marginTop: 12,
+              background: "var(--card)",
+              border: "1px solid var(--red-border)",
+              borderRadius: 16,
+              padding: 16,
+            }}
+          >
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 10 }}>
+              Incident description
+            </div>
+            <textarea
+              value={incidentText}
+              onChange={(e) => setIncidentText(e.target.value)}
+              placeholder="Briefly describe what happened..."
+              rows={3}
+              style={{
+                width: "100%",
+                background: "var(--bg-secondary)",
+                border: "1px solid var(--border)",
+                borderRadius: 12,
+                padding: "10px 14px",
+                fontSize: 14,
+                color: "var(--text-primary)",
+                resize: "none",
+                outline: "none",
+                fontFamily: "Inter, system-ui, sans-serif",
+              }}
+            />
+            <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+              <button
+                onClick={submitIncident}
+                disabled={submitting}
+                style={{
+                  flex: 1,
+                  padding: "11px 0",
+                  borderRadius: 12,
+                  border: "none",
+                  background: "var(--red)",
+                  color: "#fff",
+                  fontSize: 14,
+                  fontWeight: 600,
+                  cursor: submitting ? "not-allowed" : "pointer",
+                  opacity: submitting ? 0.6 : 1,
+                  transition: "opacity 0.15s",
+                }}
+              >
+                {submitting ? "Submitting..." : "Submit report"}
+              </button>
+              <button
+                onClick={() => { setShowIncidentForm(false); setIncidentText(""); }}
+                style={{
+                  padding: "11px 18px",
+                  borderRadius: 12,
+                  border: "1px solid var(--border)",
+                  background: "transparent",
+                  color: "var(--text-secondary)",
+                  fontSize: 14,
+                  fontWeight: 500,
+                  cursor: "pointer",
+                }}
+              >
+                Cancel
+              </button>
+            </div>
           </div>
-        </div>
-      )}
-
-      {/* ── Today's Summary ── */}
-      <p className="font-mono text-[10px] tracking-[2px] uppercase mb-[10px]" style={{ color: "var(--text-secondary)" }}>Today&apos;s Summary</p>
-      <div className="grid grid-cols-3 gap-[10px]">
-        {[
-          { val: location ? String(location.checksPassed) : "—", color: "var(--green)",  label: "CHECKS\nPASSED"  },
-          { val: location ? String(location.milesDriven)  : "—", color: "var(--cyan)",   label: "MILES\nDRIVEN"   },
-          { val: riskData  ? String(riskData.input.safetyEvents.length) : "—", color: "var(--orange)", label: "ALERTS\nACTIVE"  },
-        ].map((s) => (
-          <div key={s.label} className="rounded-xl p-[12px_10px] text-center" style={{ background: "var(--bg-card)", border: "1px solid var(--border))" }}>
-            <div className="font-display font-bold text-[22px]" style={{ color: s.color }}>{s.val}</div>
-            <div className="font-mono text-[9px] tracking-[1px] mt-[3px] whitespace-pre-line" style={{ color: "var(--text-secondary)" }}>{s.label}</div>
-          </div>
-        ))}
+        )}
       </div>
+
+      {/* ── 4. Today's Summary ───────────────────────────────────────────────── */}
+      <div>
+        <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 12, letterSpacing: "0.2px" }}>
+          Today&apos;s Summary
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+          {[
+            {
+              value: loading ? "—" : (location ? String(location.checksPassed) : "—"),
+              color: "var(--green)",
+              label: "Checks\npassed",
+            },
+            {
+              value: loading ? "—" : (location ? String(location.milesDriven) : "—"),
+              color: "var(--blue)",
+              label: "Miles\ndriven",
+            },
+            {
+              value: loading ? "—" : (riskData ? String(riskData.input.safetyEvents.length) : "—"),
+              color: riskData && riskData.input.safetyEvents.length > 0 ? "var(--warning)" : "var(--text-secondary)",
+              label: "Alerts\nactive",
+            },
+          ].map((s) => (
+            <div
+              key={s.label}
+              style={{
+                background: "var(--card)",
+                border: "1px solid var(--border)",
+                borderRadius: 16,
+                padding: "14px 12px",
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 26,
+                  fontWeight: 700,
+                  color: s.color,
+                  letterSpacing: "-0.5px",
+                  fontVariantNumeric: "tabular-nums",
+                  lineHeight: 1,
+                }}
+              >
+                {s.value}
+              </div>
+              <div
+                style={{
+                  fontSize: 11,
+                  color: "var(--text-secondary)",
+                  marginTop: 6,
+                  lineHeight: 1.35,
+                  whiteSpace: "pre-line",
+                }}
+              >
+                {s.label}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* ── 5. Recommendations ───────────────────────────────────────────────── */}
+      {parsedRecs.length > 0 && (
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 12, letterSpacing: "0.2px" }}>
+            Recommendations
+          </div>
+          <div
+            style={{
+              background: "var(--card)",
+              border: "1px solid var(--border)",
+              borderRadius: 20,
+              overflow: "hidden",
+            }}
+          >
+            {parsedRecs.map((rec, i) => (
+              <div
+                key={i}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 14,
+                  padding: "14px 16px",
+                  borderBottom: i < parsedRecs.length - 1 ? "1px solid var(--border)" : "none",
+                }}
+              >
+                {/* Icon chip */}
+                <div
+                  style={{
+                    width: 36,
+                    height: 36,
+                    borderRadius: 10,
+                    background: "var(--bg-secondary)",
+                    border: "1px solid var(--border)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    flexShrink: 0,
+                    color: "var(--blue)",
+                  }}
+                >
+                  {rec.icon}
+                </div>
+
+                {/* Text */}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 500, color: "var(--text-primary)", marginBottom: 2 }}>
+                    {rec.title}
+                  </div>
+                  <div style={{ fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.4 }}>
+                    {rec.description}
+                  </div>
+                </div>
+
+                {/* Chevron */}
+                <ChevronRight size={16} strokeWidth={1.75} style={{ color: "var(--text-tertiary)", flexShrink: 0 }} />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

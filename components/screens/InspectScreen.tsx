@@ -1,13 +1,11 @@
 "use client";
+
 import { useRef, useState } from "react";
 import { useTelegram } from "@/lib/useTelegram";
 import type { CheckItem, InspectionResult } from "@/lib/inspection";
+import { Camera, CheckCircle2, AlertTriangle, XCircle, ChevronRight } from "lucide-react";
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/** Compress an image file client-side using Canvas. Returns a JPEG Blob. */
+// ── Image compression (unchanged) ─────────────────────────────────────────────
 async function compressImage(file: File, maxWidth = 800, quality = 0.75): Promise<Blob> {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -30,14 +28,21 @@ async function compressImage(file: File, maxWidth = 800, quality = 0.75): Promis
   });
 }
 
-// ---------------------------------------------------------------------------
-// Sub-components
-// ---------------------------------------------------------------------------
+// ── Design helpers ─────────────────────────────────────────────────────────────
 
-const STATUS_STYLES: Record<string, { bg: string; color: string; border: string }> = {
-  PASS: { bg: "var(--green-dim)",              color: "var(--green)",  border: "rgba(0,232,122,0.3)"  },
-  WARN: { bg: "rgba(255,214,0,0.12)",          color: "var(--yellow)", border: "rgba(255,214,0,0.3)"  },
-  FAIL: { bg: "var(--red-dim)",                color: "var(--red)",    border: "rgba(255,60,60,0.3)"  },
+const STATUS_CONFIG: Record<string, { bg: string; color: string; border: string; icon: React.ReactNode }> = {
+  PASS: {
+    bg: "var(--green-dim)", color: "var(--green)", border: "var(--green-border)",
+    icon: <CheckCircle2 size={14} strokeWidth={1.75} />,
+  },
+  WARN: {
+    bg: "var(--warning-dim)", color: "var(--warning)", border: "var(--warning-border)",
+    icon: <AlertTriangle size={14} strokeWidth={1.75} />,
+  },
+  FAIL: {
+    bg: "var(--red-dim)", color: "var(--red)", border: "var(--red-border)",
+    icon: <XCircle size={14} strokeWidth={1.75} />,
+  },
 };
 
 const ITEM_ICONS: Record<string, string> = {
@@ -48,35 +53,13 @@ const ITEM_ICONS: Record<string, string> = {
   "Engine Bay":"⚙️",
 };
 
-function CheckItemCard({ item, animate }: { item: CheckItem; animate?: boolean }) {
-  const s = STATUS_STYLES[item.status] ?? STATUS_STYLES.WARN;
-  return (
-    <div className="flex items-center gap-3 rounded-xl p-[12px_14px]" style={{ background: "var(--bg-card)", border: "1px solid var(--border)" }}>
-      <span className="text-[18px] flex-shrink-0">{ITEM_ICONS[item.name] ?? "🔍"}</span>
-      <div className="flex-1">
-        <div className="text-[14px] font-semibold" style={{ color: "var(--text-primary)" }}>{item.name}</div>
-        <div className="font-mono text-[10px] mt-[2px]" style={{ color: "var(--text-secondary)" }}>{item.detail}</div>
-      </div>
-      <div
-        className={`font-mono text-[10px] px-2 py-[3px] rounded-xl font-bold tracking-[1px] ${animate && item.status === "FAIL" ? "status-blink" : ""}`}
-        style={{ background: s.bg, color: s.color, border: `1px solid ${s.border}` }}
-      >
-        {item.status}
-      </div>
-    </div>
-  );
-}
+const OVERALL_LABEL: Record<string, string> = {
+  PASS: "Passed",
+  WARN: "Warning",
+  FAIL: "Failed",
+};
 
-function SkeletonCard() {
-  return (
-    <div className="rounded-xl p-[12px_14px] animate-pulse" style={{ background: "var(--bg-card)", border: "1px solid var(--border)", height: "64px" }} />
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Main screen
-// ---------------------------------------------------------------------------
-
+// ── Types ──────────────────────────────────────────────────────────────────────
 type ScreenState = "idle" | "uploading" | "results";
 
 interface InspectionResponse extends InspectionResult {
@@ -84,24 +67,63 @@ interface InspectionResponse extends InspectionResult {
   signedPhotoUrl: string;
 }
 
+// ── Check item — iOS Settings row style ────────────────────────────────────────
+function CheckItemRow({ item, showDivider, animate }: { item: CheckItem; showDivider: boolean; animate?: boolean }) {
+  const cfg = STATUS_CONFIG[item.status] ?? STATUS_CONFIG.WARN;
+  return (
+    <>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 16px" }}>
+        <span style={{ fontSize: 20, flexShrink: 0 }}>{ITEM_ICONS[item.name] ?? "🔍"}</span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 500, color: "var(--text-primary)" }}>{item.name}</div>
+          <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 2, lineHeight: 1.4 }}>{item.detail}</div>
+        </div>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 5,
+            background: cfg.bg,
+            border: `1px solid ${cfg.border}`,
+            borderRadius: 99,
+            padding: "3px 10px",
+            color: cfg.color,
+            fontSize: 11,
+            fontWeight: 600,
+            flexShrink: 0,
+          }}
+          className={animate && item.status === "FAIL" ? "status-blink" : ""}
+        >
+          {cfg.icon}
+          <span>{item.status}</span>
+        </div>
+      </div>
+      {showDivider && (
+        <div style={{ height: 1, background: "var(--border)", marginLeft: 52 }} />
+      )}
+    </>
+  );
+}
+
+// ── Main component ─────────────────────────────────────────────────────────────
 export function InspectScreen() {
   const telegramUser = useTelegram();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const [state,   setState]   = useState<ScreenState>("idle");
-  const [result,  setResult]  = useState<InspectionResponse | null>(null);
-  const [error,   setError]   = useState<string | null>(null);
+  const [state,  setState]  = useState<ScreenState>("idle");
+  const [result, setResult] = useState<InspectionResponse | null>(null);
+  const [error,  setError]  = useState<string | null>(null);
 
+  // ── File handling (unchanged) ────────────────────────────────────────────────
   async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
-    if (!fileInputRef.current) fileInputRef.current!.value = "";
+    if (fileInputRef.current) fileInputRef.current.value = "";
     if (!file || !telegramUser) return;
 
     setError(null);
     setState("uploading");
 
     try {
-      // Step 1: resolve driverId
       const driverRes = await fetch("/api/driver", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -110,10 +132,8 @@ export function InspectScreen() {
       if (!driverRes.ok) throw new Error("Could not resolve driver");
       const { driver } = await driverRes.json();
 
-      // Step 2: compress image client-side
       const compressed = await compressImage(file);
 
-      // Step 3: upload to API
       const form = new FormData();
       form.append("driverId", driver.id);
       form.append("photo", compressed, "inspection.jpg");
@@ -131,7 +151,6 @@ export function InspectScreen() {
       setState("idle");
     }
 
-    // Reset file input so the same file can be re-selected
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
@@ -141,80 +160,135 @@ export function InspectScreen() {
     setState("idle");
   }
 
-  const overallStyle = result ? (STATUS_STYLES[result.overallResult] ?? STATUS_STYLES.WARN) : null;
+  const overallCfg = result ? (STATUS_CONFIG[result.overallResult] ?? STATUS_CONFIG.WARN) : null;
 
+  // ── Render ────────────────────────────────────────────────────────────────────
   return (
-    <div className="animate-fade-in">
-      <p className="font-mono text-[10px] tracking-[2px] uppercase mb-[10px]" style={{ color: "var(--text-secondary)" }}>
-        Computer Vision · AR Inspection
-      </p>
+    <div className="animate-fade-in" style={{ padding: "24px 20px 8px", display: "flex", flexDirection: "column", gap: 24 }}>
 
-      {/* ── AR Viewport ── */}
-      <div className="rounded-2xl overflow-hidden relative h-[280px] mb-4" style={{ background: "#000", border: `1px solid ${overallStyle?.border ?? "var(--border-bright)"}` }}>
-        <div className="w-full h-full flex items-center justify-center relative" style={{ background: "linear-gradient(180deg,#0a1a10 0%,#050e08 100%)" }}>
-          <span className="text-[90px]" style={{ opacity: 0.18 }}>🚛</span>
-
-          <div className="absolute inset-0">
-            <div className="reticle-tl" /><div className="reticle-tr" />
-            <div className="reticle-bl" /><div className="reticle-br" />
-
-            {/* Scan line — always visible when uploading, hidden otherwise */}
-            {state === "uploading" && <div className="ar-scan-line" />}
-
-            {/* Status chip */}
-            <div
-              className="absolute top-3 left-1/2 -translate-x-1/2 font-mono text-[9px] px-[10px] py-[3px] rounded-full whitespace-nowrap"
-              style={{
-                color:      state === "results" ? overallStyle!.color : "var(--green)",
-                background: "rgba(0,0,0,0.7)",
-                border:     `1px solid ${state === "results" ? overallStyle!.border : "rgba(0,232,122,0.3)"}`,
-              }}
-            >
-              {state === "idle"      && "● READY TO SCAN"}
-              {state === "uploading" && "● ANALYZING…"}
-              {state === "results"   && `● ${result!.overallResult} — ${Math.round(result!.confidence * 100)}% CONFIDENCE`}
-            </div>
-
-            {/* Result bounding-box overlays */}
-            {state === "results" && result && (() => {
-              const positions = [
-                { left:"12%", top:"55%", w:"22%", h:"28%" },
-                { left:"65%", top:"52%", w:"24%", h:"30%" },
-                { left:"38%", top:"30%", w:"26%", h:"22%" },
-                { left:"12%", top:"22%", w:"22%", h:"22%" },
-                { left:"65%", top:"22%", w:"24%", h:"22%" },
-              ];
-              return result.checkItems.map((item, i) => {
-                const s  = STATUS_STYLES[item.status] ?? STATUS_STYLES.WARN;
-                const p  = positions[i] ?? positions[0];
-                return (
-                  <div
-                    key={item.name}
-                    className="bbox-anim absolute"
-                    style={{ left:p.left, top:p.top, width:p.w, height:p.h, border:`2px solid ${s.color}`, borderRadius:"4px", boxShadow:`0 0 10px ${s.color}40` }}
-                  >
-                    <span
-                      className="absolute -top-[22px] -left-[1px] font-mono text-[9px] px-[6px] py-[2px] rounded-[3px]"
-                      style={{ background:s.color, color: item.status === "WARN" ? "#000" : item.status === "PASS" ? "#000" : "#fff" }}
-                    >
-                      {item.name.toUpperCase()}
-                    </span>
-                  </div>
-                );
-              });
-            })()}
-          </div>
+      {/* Page header */}
+      <div>
+        <div style={{ fontSize: 20, fontWeight: 600, color: "var(--text-primary)", letterSpacing: "-0.4px" }}>
+          Vehicle Inspection
+        </div>
+        <div style={{ fontSize: 13, color: "var(--text-secondary)", marginTop: 4 }}>
+          AI-powered pre-trip analysis
         </div>
       </div>
 
-      {/* ── Error ── */}
+      {/* ── AR Viewport ─────────────────────────────────────────────────────── */}
+      <div
+        style={{
+          borderRadius: 20,
+          overflow: "hidden",
+          height: 240,
+          background: "#040e0a",
+          border: `1px solid ${overallCfg?.border ?? "var(--border)"}`,
+          position: "relative",
+        }}
+      >
+        <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
+          {/* Background emoji */}
+          <span style={{ fontSize: 80, opacity: 0.12 }}>🚛</span>
+
+          {/* Corner reticles */}
+          <div className="reticle-tl" />
+          <div className="reticle-tr" />
+          <div className="reticle-bl" />
+          <div className="reticle-br" />
+
+          {/* Scan animation */}
+          {state === "uploading" && <div className="ar-scan-line" />}
+
+          {/* Status chip */}
+          <div
+            style={{
+              position: "absolute",
+              top: 14,
+              left: "50%",
+              transform: "translateX(-50%)",
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              background: "rgba(0,0,0,0.72)",
+              border: `1px solid ${state === "results" ? overallCfg!.border : "var(--green-border)"}`,
+              borderRadius: 99,
+              padding: "5px 14px",
+              color: state === "results" ? overallCfg!.color : "var(--green)",
+              fontSize: 11,
+              fontWeight: 500,
+              whiteSpace: "nowrap",
+            }}
+          >
+            <div
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: "50%",
+                background: state === "results" ? overallCfg!.color : "var(--green)",
+                flexShrink: 0,
+              }}
+              className={state === "uploading" ? "dot-pulse" : ""}
+            />
+            {state === "idle"      && "Ready to scan"}
+            {state === "uploading" && "Analyzing vehicle..."}
+            {state === "results"   && `${OVERALL_LABEL[result!.overallResult]} — ${Math.round(result!.confidence * 100)}% confidence`}
+          </div>
+
+          {/* Result bounding-box overlays */}
+          {state === "results" && result && (() => {
+            const positions = [
+              { left: "12%", top: "55%", w: "22%", h: "28%" },
+              { left: "65%", top: "52%", w: "24%", h: "30%" },
+              { left: "38%", top: "30%", w: "26%", h: "22%" },
+              { left: "12%", top: "22%", w: "22%", h: "22%" },
+              { left: "65%", top: "22%", w: "24%", h: "22%" },
+            ];
+            return result.checkItems.map((item, i) => {
+              const s = STATUS_CONFIG[item.status] ?? STATUS_CONFIG.WARN;
+              const p = positions[i] ?? positions[0];
+              return (
+                <div
+                  key={item.name}
+                  className="bbox-anim"
+                  style={{
+                    position: "absolute",
+                    left: p.left, top: p.top, width: p.w, height: p.h,
+                    border: `1.5px solid ${s.color}`,
+                    borderRadius: 6,
+                  }}
+                >
+                  <span
+                    style={{
+                      position: "absolute",
+                      top: -20,
+                      left: -1,
+                      fontSize: 9,
+                      fontWeight: 600,
+                      padding: "2px 6px",
+                      borderRadius: 4,
+                      background: s.color,
+                      color: item.status === "PASS" || item.status === "WARN" ? "#000" : "#fff",
+                      letterSpacing: "0.3px",
+                    }}
+                  >
+                    {item.name.toUpperCase()}
+                  </span>
+                </div>
+              );
+            });
+          })()}
+        </div>
+      </div>
+
+      {/* Error */}
       {error && (
-        <p className="font-mono text-[11px] text-center mb-3" style={{ color: "var(--red)" }}>
+        <div style={{ fontSize: 13, color: "var(--red)", textAlign: "center" }}>
           {error}
-        </p>
+        </div>
       )}
 
-      {/* ── Action area ── */}
+      {/* ── Primary action button ─────────────────────────────────────────────── */}
       {state !== "results" && (
         <>
           <input
@@ -228,60 +302,123 @@ export function InspectScreen() {
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={state === "uploading" || !telegramUser}
-            className="w-full py-[14px] rounded-2xl font-display font-black text-[15px] tracking-[3px] uppercase mb-4"
             style={{
+              width: "100%",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 10,
+              padding: "16px 24px",
+              borderRadius: 16,
+              border: state === "uploading"
+                ? "1px solid var(--border)"
+                : "1px solid var(--blue-border)",
               background: state === "uploading"
-                ? "rgba(0,200,255,0.05)"
-                : "linear-gradient(135deg,rgba(0,200,255,0.12),rgba(0,200,255,0.06))",
-              border: "1px solid var(--cyan)",
-              color:  state === "uploading" ? "var(--text-secondary)" : "var(--cyan)",
+                ? "var(--bg-secondary)"
+                : "var(--blue-dim)",
+              color: state === "uploading" ? "var(--text-tertiary)" : "var(--blue)",
+              fontSize: 15,
+              fontWeight: 600,
               cursor: state === "uploading" ? "not-allowed" : "pointer",
+              transition: "all 0.15s ease",
             }}
           >
-            {state === "uploading" ? "ANALYZING VEHICLE…" : "📷 TAP TO INSPECT"}
+            <Camera size={18} strokeWidth={1.75} />
+            {state === "uploading" ? "Analyzing vehicle..." : "Start Inspection"}
           </button>
         </>
       )}
 
-      {/* ── Check item list ── */}
-      <p className="font-mono text-[10px] tracking-[2px] uppercase mb-[10px]" style={{ color: "var(--text-secondary)" }}>
-        Pre-Trip Inspection Checklist
-      </p>
-
-      <div className="flex flex-col gap-2">
-        {state === "uploading" && [1,2,3,4,5].map((i) => <SkeletonCard key={i} />)}
-
-        {state === "results" && result && (
-          <>
-            {result.checkItems.map((item) => (
-              <CheckItemCard key={item.name} item={item} animate />
-            ))}
-
-            {/* Summary + new inspection button */}
-            <div className="rounded-xl p-[12px_14px] mt-1" style={{ background: "var(--bg-card)", border: `1px solid ${overallStyle!.border}` }}>
-              <p className="font-mono text-[10px] mb-1" style={{ color: "var(--text-secondary)" }}>AI SUMMARY</p>
-              <p className="text-[13px] leading-snug" style={{ color: "var(--text-primary)" }}>{result.summary}</p>
-            </div>
-
-            <button
-              onClick={reset}
-              className="w-full py-[12px] rounded-2xl font-display font-bold text-[13px] tracking-[2px] uppercase mt-1"
-              style={{ background: "var(--bg-card)", border: "1px solid var(--border)", color: "var(--text-secondary)", cursor: "pointer" }}
-            >
-              NEW INSPECTION
-            </button>
-          </>
-        )}
-
-        {state === "idle" && (
-          <div className="rounded-xl p-[14px] text-center" style={{ background: "var(--bg-card)", border: "1px solid var(--border)" }}>
-            <p className="font-mono text-[11px]" style={{ color: "var(--text-secondary)" }}>
-              Tap the button above to photograph your vehicle.<br />
-              The AI will analyze it and generate an inspection report.
-            </p>
+      {/* ── Idle placeholder ─────────────────────────────────────────────────── */}
+      {state === "idle" && (
+        <div
+          style={{
+            background: "var(--card)",
+            border: "1px solid var(--border)",
+            borderRadius: 16,
+            padding: "20px 16px",
+            textAlign: "center",
+          }}
+        >
+          <div style={{ fontSize: 13, fontWeight: 500, color: "var(--text-secondary)", marginBottom: 4 }}>
+            No recent inspections
           </div>
-        )}
-      </div>
+          <div style={{ fontSize: 12, color: "var(--text-tertiary)", lineHeight: 1.5 }}>
+            Tap Start Inspection to photograph your vehicle.
+            The AI will check tires, brakes, lights, windshield, and engine bay.
+          </div>
+        </div>
+      )}
+
+      {/* ── Check items (skeleton during analysis) ───────────────────────────── */}
+      {state === "uploading" && (
+        <div style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 20, overflow: "hidden" }}>
+          {[1, 2, 3, 4, 5].map((_, i) => (
+            <div key={i}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 16px" }}>
+                <div className="skeleton" style={{ width: 28, height: 28, borderRadius: 8, flexShrink: 0 }} />
+                <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6 }}>
+                  <div className="skeleton" style={{ height: 13, width: "40%" }} />
+                  <div className="skeleton" style={{ height: 11, width: "70%" }} />
+                </div>
+                <div className="skeleton" style={{ width: 52, height: 22, borderRadius: 99 }} />
+              </div>
+              {i < 4 && <div style={{ height: 1, background: "var(--border)", marginLeft: 52 }} />}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ── Results ──────────────────────────────────────────────────────────── */}
+      {state === "results" && result && (
+        <>
+          {/* Check items list */}
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 12, letterSpacing: "0.2px" }}>
+              Inspection Checklist
+            </div>
+            <div style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 20, overflow: "hidden" }}>
+              {result.checkItems.map((item, i) => (
+                <CheckItemRow
+                  key={item.name}
+                  item={item}
+                  showDivider={i < result.checkItems.length - 1}
+                  animate
+                />
+              ))}
+            </div>
+          </div>
+
+          {/* AI summary */}
+          <div style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 16, padding: "14px 16px" }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-tertiary)", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 8 }}>
+              AI Summary
+            </div>
+            <div style={{ fontSize: 14, color: "var(--text-primary)", lineHeight: 1.5 }}>
+              {result.summary}
+            </div>
+          </div>
+
+          {/* New inspection button */}
+          <button
+            onClick={reset}
+            style={{
+              width: "100%",
+              padding: "14px 0",
+              borderRadius: 16,
+              border: "1px solid var(--border)",
+              background: "var(--card)",
+              color: "var(--text-secondary)",
+              fontSize: 14,
+              fontWeight: 500,
+              cursor: "pointer",
+            }}
+          >
+            New Inspection
+          </button>
+        </>
+      )}
+
     </div>
   );
 }
