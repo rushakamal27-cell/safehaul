@@ -26,7 +26,11 @@ export type DriverEventType =
   | "harsh_turn"
   | "high_speed_power_loss"
   | "inattentive_driving"
-  | "mobile_usage";
+  | "mobile_usage"
+  | "speeding"
+  | "rolling_stop"
+  | "following_distance"
+  | "forward_collision_warning";
 
 /** Provider-neutral normalized event ready for DriverEvent persistence. */
 export interface NormalizedProviderEvent {
@@ -72,6 +76,29 @@ export const SAMSARA_TYPE_MAP: Readonly<Record<string, DriverEventType>> = {
   inattentive:           "inattentive_driving",
   inattentiveDriving:    "inattentive_driving",
   mobileUsage:           "mobile_usage",
+
+  // v2 Safety Events Stream labels. PascalCase confirmed against real pilot org data
+  // (2026-07-12); camelCase added defensively, same as the original 6 types above —
+  // only PascalCase has actually been observed from this API so far.
+  // Samsara's v2 behaviorLabels enum has NO "HarshBrake"/"HarshBraking" member — only
+  // "Braking" — while "HarshTurn" is still present unchanged. This is the same
+  // g-force-threshold "Harsh Event Detection" family Samsara docs describe for
+  // braking/acceleration/turning; "Braking" is treated as the v2 rename of harsh_braking.
+  Braking:                 "harsh_braking",
+  braking:                 "harsh_braking",
+  // SevereSpeeding and MaxSpeed are distinct Samsara trigger conditions (relative-to-limit
+  // vs absolute-limit) but both funnel into the existing "speeding" risk-engine bucket —
+  // severity is not tiered by label name for either (Samsara omits `severity` on both).
+  SevereSpeeding:          "speeding",
+  severeSpeeding:          "speeding",
+  MaxSpeed:                "speeding",
+  maxSpeed:                "speeding",
+  RollingStop:             "rolling_stop",
+  rollingStop:             "rolling_stop",
+  FollowingDistance:       "following_distance",
+  followingDistance:       "following_distance",
+  ForwardCollisionWarning: "forward_collision_warning",
+  forwardCollisionWarning: "forward_collision_warning",
 };
 
 // ---------------------------------------------------------------------------

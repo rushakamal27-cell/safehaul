@@ -11,8 +11,9 @@
  *   - Severity: "low" | "medium" | "high" | "critical" string from Samsara
  *
  * Design rules (same as normalizeEvent.ts):
- *   - NEVER throw — return null on any parse failure
- *   - Log unsupported label strings so new event types are visible without crashing
+ *   - NEVER throw — return { event: null, skipReason } on any parse failure
+ *   - Skip reasons and observed labels are returned, not logged here — the
+ *     caller (route.ts) logs one structured entry per skip
  *   - All field-path assumptions are marked TODO for validation against real payloads
  */
 
@@ -24,28 +25,44 @@ import {
 } from "./normalizeEvent";
 import type { SamsaraSafetyStreamEvent } from "./types";
 
+/** Why normalizeSafetyStreamEvent() could not produce a NormalizedProviderEvent. */
+export type StreamSkipReason =
+  | "no_driver_id"
+  | "unsupported_behavior_label"
+  | "no_timestamp"
+  | "unexpected_error";
+
+export interface NormalizeStreamResult {
+  event: NormalizedProviderEvent | null;
+  /** Set only when event is null. */
+  skipReason?: StreamSkipReason;
+  /** Raw driver.id, when available, even on skip — used for skip logging. */
+  externalDriverId?: string;
+  /** Raw behaviorLabels[].label values observed, when available — used for skip logging. */
+  observedLabels?: string[];
+}
+
 /**
  * Converts a v2 stream safety event into a NormalizedProviderEvent.
  *
- * Returns null when:
- *   - The event has no driver ID
- *   - None of the behaviorLabels map to a supported DriverEventType
- *   - Any unexpected error occurs
+ * Returns { event: null, skipReason } when:
+ *   - The event has no driver ID            (no_driver_id)
+ *   - None of the behaviorLabels map to a supported DriverEventType (unsupported_behavior_label)
+ *   - The event has no startMs/createdAtTime (no_timestamp)
+ *   - Any unexpected error occurs            (unexpected_error)
  *
  * Never throws.
  */
 export function normalizeSafetyStreamEvent(
   event: SamsaraSafetyStreamEvent
-): NormalizedProviderEvent | null {
+): NormalizeStreamResult {
   try {
     // --- Required: external driver ID ---
     // TODO: Confirm field path — observed as event.driver.id in insuretech docs.
     const externalDriverId = event.driver?.id;
     if (!externalDriverId) {
-      console.warn(
-        `[normalizeStreamEvent] Event id="${event.id}" has no driver.id — skipping`
-      );
-      return null;
+      // Skip is logged once, by the caller, as a structured entry (see route.ts).
+      return { event: null, skipReason: "no_driver_id" };
     }
 
     // --- Event type: first behaviorLabel that maps to a supported DriverEventType ---
@@ -55,6 +72,7 @@ export function normalizeSafetyStreamEvent(
     // TODO: Confirm behaviorLabels[].label casing matches SAMSARA_TYPE_MAP keys.
     //       Observed: camelCase ("harshBrake", "mobileUsage") in insuretech examples.
     const labels = event.behaviorLabels ?? [];
+    const observedLabels = labels.map((l) => l.label);
     let internalType: DriverEventType | undefined;
 
     for (const bl of labels) {
@@ -66,13 +84,13 @@ export function normalizeSafetyStreamEvent(
     }
 
     if (!internalType) {
-      const labelStrings = labels.map((l) => `"${l.label}"`).join(", ");
-      console.info(
-        `[normalizeStreamEvent] Event id="${event.id}" has no supported behaviorLabel` +
-          (labelStrings ? ` (received: ${labelStrings})` : " (behaviorLabels absent)") +
-          " — ignoring"
-      );
-      return null;
+      // Skip is logged once, by the caller, as a structured entry (see route.ts).
+      return {
+        event: null,
+        skipReason: "unsupported_behavior_label",
+        externalDriverId,
+        observedLabels,
+      };
     }
 
     // --- Optional fields ---
@@ -96,10 +114,8 @@ export function normalizeSafetyStreamEvent(
     // Falls back to "createdAtTime" if startMs is absent.
     const rawTimestamp = event.startMs ?? event.createdAtTime;
     if (!rawTimestamp) {
-      console.warn(
-        `[normalizeStreamEvent] Event id="${event.id}" has no startMs or createdAtTime — skipping`
-      );
-      return null;
+      // Skip is logged once, by the caller, as a structured entry (see route.ts).
+      return { event: null, skipReason: "no_timestamp", externalDriverId, observedLabels };
     }
     const timestamp = rawTimestamp;
 
@@ -115,13 +131,13 @@ export function normalizeSafetyStreamEvent(
       ...(lng !== undefined ? { lng } : {}),
     };
 
-    return normalized;
+    return { event: normalized };
   } catch (err) {
     // Catch-all: normalization must never crash the sync route
     console.error(
       `[normalizeStreamEvent] Unexpected error for event id="${event.id}":`,
       err
     );
-    return null;
+    return { event: null, skipReason: "unexpected_error" };
   }
 }

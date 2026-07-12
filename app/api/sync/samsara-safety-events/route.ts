@@ -45,7 +45,10 @@ import {
   fetchSamsaraSafetyEvents,
   SamsaraApiError,
 } from "@/lib/providers/samsara/safetyEventsStream";
-import { normalizeSafetyStreamEvent } from "@/lib/providers/samsara/normalizeStreamEvent";
+import {
+  normalizeSafetyStreamEvent,
+  type StreamSkipReason,
+} from "@/lib/providers/samsara/normalizeStreamEvent";
 
 const PROVIDER = "samsara" as const;
 const STREAM_KEY = "safety-events" as const;
@@ -131,10 +134,17 @@ export async function GET(request: NextRequest) {
   // ── Steps 4: Drain pages ──────────────────────────────────────────────────
   let pagesProcessed = 0;
   let eventsProcessed = 0;
-  let eventsSkipped = 0; // unsupported type or missing driver
+  let eventsSkipped = 0; // unsupported type, missing driver, or missing timestamp
   let duplicates = 0;
   let driverEventsCreated = 0;
   let lastCursor: string | undefined;
+  const skipReasons: Record<StreamSkipReason, number> = {
+    no_driver_id: 0,
+    unsupported_behavior_label: 0,
+    no_timestamp: 0,
+    unexpected_error: 0,
+  };
+  const unsupportedLabelCounts: Record<string, number> = {};
 
   try {
     let hasNextPage = true;
@@ -157,17 +167,13 @@ export async function GET(request: NextRequest) {
       for (const rawEvent of page.data) {
         eventsProcessed++;
 
-        // Normalize — returns null for unsupported types or missing driver ID
-        const normalized = normalizeSafetyStreamEvent(rawEvent);
-        if (!normalized) {
-          eventsSkipped++;
-          continue;
-        }
+        // externalEventId is always set for stream events (event.id is required by schema)
+        const externalEventId = rawEvent.id;
 
-        // externalEventId is always set for stream events (event.id is required)
-        const externalEventId = normalized.externalEventId!;
-
-        // Dedup check: optimistic findUnique first, then create with P2002 catch
+        // Dedup check: optimistic findUnique first, then create with P2002 catch.
+        // This now happens BEFORE normalization — the raw payload is preserved
+        // regardless of whether normalization later succeeds, so unsupported
+        // events remain available for replay once new labels are supported.
         let rawProviderEventId: string | undefined;
         let isDuplicate = false;
 
@@ -218,13 +224,43 @@ export async function GET(request: NextRequest) {
 
         if (isDuplicate || !rawProviderEventId) continue;
 
+        // Normalize — returns { event: null, skipReason, ... } for unsupported
+        // labels, missing driver ID, or missing timestamp. The RawProviderEvent
+        // row created above is kept either way.
+        const normalized = normalizeSafetyStreamEvent(rawEvent);
+
+        if (!normalized.event) {
+          eventsSkipped++;
+          const reason = normalized.skipReason ?? "unexpected_error";
+          skipReasons[reason] = (skipReasons[reason] ?? 0) + 1;
+
+          if (reason === "unsupported_behavior_label") {
+            for (const label of normalized.observedLabels ?? []) {
+              unsupportedLabelCounts[label] = (unsupportedLabelCounts[label] ?? 0) + 1;
+            }
+          }
+
+          // Structured, greppable skip log — no secrets, no full payload.
+          console.warn(
+            JSON.stringify({
+              msg:              "sync_skip",
+              reason,
+              externalEventId,
+              externalDriverId: normalized.externalDriverId ?? rawEvent.driver?.id ?? null,
+              timestamp:        rawEvent.startMs ?? rawEvent.createdAtTime ?? null,
+              labels:           normalized.observedLabels ?? [],
+            })
+          );
+          continue;
+        }
+
         // Resolve pilot driver mapping and create DriverEvent
         try {
           const mapping = await prisma.driverProviderMapping.findUnique({
             where: {
               provider_externalDriverId: {
                 provider:         PROVIDER,
-                externalDriverId: normalized.externalDriverId,
+                externalDriverId: normalized.event.externalDriverId,
               },
             },
             select: { driverId: true, isPilot: true, isActive: true },
@@ -233,7 +269,7 @@ export async function GET(request: NextRequest) {
           if (!mapping) {
             // Should not happen since we pre-filtered by pilot driver IDs, but guard anyway
             console.info(
-              `[sync/samsara] No mapping for externalDriverId="${normalized.externalDriverId}" — skipping`
+              `[sync/samsara] No mapping for externalDriverId="${normalized.event.externalDriverId}" — skipping`
             );
             continue;
           }
@@ -248,13 +284,13 @@ export async function GET(request: NextRequest) {
               driverId:           mapping.driverId,
               rawProviderEventId,
               provider:           PROVIDER,
-              externalDriverId:   normalized.externalDriverId,
-              externalVehicleId:  normalized.externalVehicleId ?? null,
-              type:               normalized.type,
-              severity:           normalized.severity,
-              timestamp:          new Date(normalized.timestamp),
-              lat:                normalized.lat ?? null,
-              lng:                normalized.lng ?? null,
+              externalDriverId:   normalized.event.externalDriverId,
+              externalVehicleId:  normalized.event.externalVehicleId ?? null,
+              type:               normalized.event.type,
+              severity:           normalized.event.severity,
+              timestamp:          new Date(normalized.event.timestamp),
+              lat:                normalized.event.lat ?? null,
+              lng:                normalized.event.lng ?? null,
             },
           });
 
@@ -315,6 +351,8 @@ export async function GET(request: NextRequest) {
         pagesProcessed,
         eventsProcessed,
         eventsSkipped,
+        skipReasons,
+        unsupportedLabelsFound: unsupportedLabelCounts,
         duplicates,
         driverEventsCreated,
         elapsedMs: Date.now() - startedAt,
@@ -328,6 +366,8 @@ export async function GET(request: NextRequest) {
     pagesProcessed,
     eventsProcessed,
     eventsSkipped,
+    skipReasons,
+    unsupportedLabelsFound: unsupportedLabelCounts,
     duplicates,
     driverEventsCreated,
     cursor:             lastCursor,
