@@ -198,10 +198,11 @@ model ProviderSyncState {
   id         String    @id @default(cuid())
   provider   String    // "samsara" | future providers
   streamKey  String    // "safety-events" | future stream identifiers
-  cursor     String?   // last endCursor from pagination; null triggers cold-start bootstrap
-  lastSyncAt DateTime?
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
+  cursor       String?   // last endCursor from pagination; null triggers cold-start bootstrap
+  lastSyncAt   DateTime?
+  syncLockedAt DateTime? // set while an on-demand sync is claimed; stale locks are reclaimable (see lib/providers/samsara/onDemandSync.ts)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
 
   @@unique([provider, streamKey])
   @@index([provider])

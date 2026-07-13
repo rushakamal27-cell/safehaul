@@ -35,6 +35,8 @@ export interface FetchSafetyEventsParams {
    * Max 2000 per Samsara's API documentation.
    */
   driverIds?: string[];
+  /** Optional abort signal — lets callers enforce a bounded wait (e.g. on-demand sync). */
+  signal?: AbortSignal;
 }
 
 /** Structured error for Samsara API HTTP failures. */
@@ -91,6 +93,7 @@ export async function fetchSamsaraSafetyEvents(
     },
     // Prevent Next.js from caching this — it must always hit the live API
     cache: "no-store",
+    signal: params.signal,
   });
 
   if (!response.ok) {

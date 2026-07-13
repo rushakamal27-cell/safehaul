@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { calculateRisk } from "@/lib/riskEngine";
 import { getRiskInputForDriver, getDriverVehicleContext, getDriverDailySummary } from "@/lib/samsara";
 import { isPilotDriver, getRecentDriverEvents, driverEventsToRiskSafetyEvents } from "@/lib/driverEvents";
+import { ensureFreshSamsaraSync, type OnDemandSyncStatus } from "@/lib/providers/samsara/onDemandSync";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/lib/generated/prisma";
 import { getOrCreateTodayTrip } from "@/lib/trip";
@@ -33,9 +34,25 @@ export async function GET(request: NextRequest) {
     lastEventTimestamp: string | null;
     lastSyncTime: string | null;
     driverEventCount24h: number;
+    syncStatus: OnDemandSyncStatus;
   } | null = null;
 
   if (pilotDriver) {
+    // Refresh Samsara data on-demand if it's stale — replaces the removed
+    // 5-minute cron (Hobby plan). No-ops (status "fresh") on the common path.
+    const syncDecision = await ensureFreshSamsaraSync();
+
+    console.info(
+      JSON.stringify({
+        msg: "on_demand_sync_decision",
+        driverId,
+        previousLastSyncAt: syncDecision.previousLastSyncAt?.toISOString() ?? null,
+        status: syncDecision.status,
+        elapsedMs: syncDecision.elapsedMs,
+      })
+    );
+
+    // Re-read events after the (possible) sync so scoring reflects any newly stored data.
     const [realEvents, mapping, syncState] = await Promise.all([
       getRecentDriverEvents(driverId),
       prisma.driverProviderMapping.findFirst({
@@ -56,6 +73,7 @@ export async function GET(request: NextRequest) {
       lastEventTimestamp: realEvents[0]?.timestamp.toISOString() ?? null,
       lastSyncTime: syncState?.lastSyncAt?.toISOString() ?? null,
       driverEventCount24h: realEvents.length,
+      syncStatus: syncDecision.status,
     };
   }
 
