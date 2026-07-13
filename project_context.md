@@ -8,10 +8,84 @@ The platform is evolving from a Telegram Mini App MVP into a provider-neutral re
 * operational safety visibility;
 * future ML-driven risk prediction.
 
+SafeHaul has successfully transitioned from a prototype using mock safety events to a **Real Data MVP** connected to a live Samsara fleet.
+
 Current development phase:
 
 ```txt
-Controlled Real-Data Pilot
+Real Data MVP — Controlled Pilot
+```
+
+---
+
+# Completed 2026-07-12: On-Demand Samsara Sync
+
+The planned 5-minute Vercel Cron sync was abandoned after discovering the
+project runs on the **Vercel Hobby plan**, which cannot run 5-minute crons
+reliably. On-demand synchronization was implemented instead:
+
+* Removed the `*/5 * * * *` Samsara cron from `vercel.json` (permanently —
+  not paused pending a plan upgrade).
+* Extracted the Samsara Safety Events Stream drain loop into a reusable
+  server-side service: `lib/providers/samsara/syncSafetyEvents.ts`, callable
+  directly from server code with no HTTP hop back to our own deployment.
+* Added `lib/providers/samsara/onDemandSync.ts` — `/api/risk` calls
+  `ensureFreshSamsaraSync()` for pilot drivers before scoring:
+  * Reads `ProviderSyncState.lastSyncAt`; refreshes only if missing or
+    older than 5 minutes.
+  * Concurrency guard is **database-backed**, not in-memory, since separate
+    serverless instances can run simultaneously: an atomic `create()` claims
+    the lock (falling back to an atomic `updateMany()` on a `P2002` unique
+    -constraint race, mirroring the existing `RawProviderEvent` dedup
+    pattern rather than trusting `upsert()`'s internal atomicity).
+  * Bounded to a 6-second `AbortController` timeout, chosen to leave
+    headroom under Vercel Hobby's ~10s function execution limit.
+  * Lock is always released in `finally`.
+  * `lastSyncAt` is now stamped exactly once, only after a fully successful
+    drain — fixed a bug where a failed/timed-out sync could otherwise leave
+    a recent-looking timestamp from a completed page checkpoint, making
+    stale data appear fresh.
+* Preserved the manual `CRON_SECRET`-protected route
+  (`GET /api/sync/samsara-safety-events`) for ops/manual use — it now just
+  calls the shared service.
+* Structured logs added: `on_demand_sync_decision` (per `/api/risk` call,
+  pilot drivers only) and `sync_complete` (kept from the original cron
+  implementation).
+* Sync statuses are deterministic: `fresh`, `refreshed`, `refresh_failed`,
+  `sync_in_progress` — no ambiguous combined states.
+* 10 targeted `node:test` cases added
+  (`lib/providers/samsara/__tests__/onDemandSync.test.ts`) covering cold
+  start, stale state, concurrent cold-start/stale races, timeout, provider
+  failure, and zero/nonzero-event successful syncs. Run via `npm test`
+  (`tsx` added as a devDependency for this).
+* Non-pilot/demo drivers are entirely unaffected — the freshness check and
+  sync are skipped for them.
+
+**Deployed to production:** commit `a690a6f` on `main`. Verified in
+production: `syncStatus: "refreshed"` and `"fresh"` both observed,
+`sync_complete` logs present, no unnecessary Samsara calls while data is
+fresh.
+
+Current on-demand architecture:
+
+```txt
+Driver
+    ↓
+Telegram Mini App
+    ↓
+/api/risk
+    ↓
+Check ProviderSyncState.lastSyncAt
+    ↓
+If stale (>5 minutes)
+        ↓
+Run shared Samsara sync (DB-backed lock + 6s timeout)
+        ↓
+Update DriverEvents
+        ↓
+Calculate Risk
+        ↓
+Return Heads-Up response
 ```
 
 # Current Tech Stack
@@ -32,7 +106,7 @@ Backend:
 
 External integrations:
 
-* Samsara (webhook ingestion in progress)
+* Samsara (webhook ingestion + on-demand Safety Events Stream sync)
 * Anthropic Claude API (inspection analysis)
 * OpenWeather API
 
@@ -229,13 +303,22 @@ Unknown provider events:
 
 ## Pilot Drivers
 
-Pilot drivers now use REAL DriverEvent rows:
+Pilot drivers use REAL DriverEvent rows, refreshed on-demand when stale
+(2026-07-12 — see "Completed 2026-07-12" above):
 
 ```txt
+ensureFreshSamsaraSync() [if lastSyncAt >5min old]
+      ↓
 DriverEvent DB rows
       ↓
 Risk Engine
 ```
+
+**Caveat — `dataSource: "real"` currently overstates truthfulness.** Only
+safety events (harsh_braking, mobile_usage, etc.) are truly live for pilot
+drivers. HOS, speed, and zone risk are still mock inputs even for pilot
+drivers. See "Current Technical Debt" → "Data Truthfulness" below — this is
+the top priority for the next session.
 
 ## Non-Pilot Drivers
 
@@ -282,47 +365,56 @@ Not yet implemented:
 
 ---
 
-# Phase 5A: Safety Events Stream Sync
+# Phase 5A → 5D: Safety Events Stream Sync (now On-Demand)
 
-## Status: VALIDATED ✓ (2026-06-04)
+## Status: VALIDATED ✓ (2026-06-04), sync trigger superseded 2026-07-12
 
-All three gates passed:
+The underlying Samsara Safety Events Stream integration (endpoint, payload
+parsing, dedup) was fully validated on 2026-06-04 (see below) and is
+unchanged. What changed on 2026-07-12 is **how the sync is triggered**: the
+planned `*/5 * * * *` Vercel Cron was abandoned (Hobby plan cannot run it
+reliably) in favor of on-demand sync from `/api/risk` — see the "Completed
+2026-07-12" section above for the full design. The cron entry has been
+**removed from `vercel.json`**, not merely paused.
+
+Original three validation gates (still true, now historical):
 1. `SAMSARA_API_TOKEN` configured and verified ✓
 2. Manual sync returned HTTP 200 with real Samsara data ✓
 3. First real DriverEvents created from stream data ✓ (3 × mobile_usage for driver 53142293)
-
-Cron entry may now be re-added to `vercel.json` (requires Vercel Pro plan).
 
 ## Purpose
 
 The Samsara Safety Events Stream API (`GET /safety-events/stream`) is the
 authoritative source for harsh_braking, mobile_usage, inattentive_driving, and
-harsh_turn events. Phase 5A adds a cron-triggered poller alongside the existing
-webhook pipeline.
+harsh_turn events.
 
-## Architecture
+## Architecture (current — on-demand, DB-lock guarded)
 
 ```txt
-Vercel Cron (*/5 * * * *)
-        ↓
-GET /api/sync/samsara-safety-events
-[CRON_SECRET auth]
-        ↓
-Fetch pilot driver IDs from DriverProviderMapping
-        ↓
-fetchSamsaraSafetyEvents(afterCursor?, driverIds[])
-        ↓
-Loop until hasNextPage = false:
-        ↓
-normalizeSafetyStreamEvent(event) → NormalizedProviderEvent | null
-        ↓
-RawProviderEvent (source="stream", dedup via externalEventId)
-        ↓
-DriverProviderMapping lookup + isPilot check
-        ↓
-DriverEvent
-        ↓
-ProviderSyncState cursor update
+/api/risk (pilot driver)                 GET /api/sync/samsara-safety-events
+        ↓                                  [CRON_SECRET auth, manual/ops use]
+ensureFreshSamsaraSync()                            ↓
+[DB lock via ProviderSyncState.syncLockedAt]         ↓
+        ↓                                            ↓
+        └──────────────→ runSamsaraSafetyEventsSync() ←──────────────┘
+                    (lib/providers/samsara/syncSafetyEvents.ts)
+                                 ↓
+                    Fetch pilot driver IDs from DriverProviderMapping
+                                 ↓
+                    fetchSamsaraSafetyEvents(afterCursor?, driverIds[], signal?)
+                                 ↓
+                    Loop until hasNextPage = false:
+                                 ↓
+                    normalizeSafetyStreamEvent(event) → NormalizedProviderEvent | null
+                                 ↓
+                    RawProviderEvent (source="stream", dedup via externalEventId)
+                                 ↓
+                    DriverProviderMapping lookup + isPilot check
+                                 ↓
+                    DriverEvent
+                                 ↓
+                    ProviderSyncState cursor update per page;
+                    lastSyncAt stamped once, only on full success
 ```
 
 ## Key properties
@@ -341,7 +433,10 @@ ProviderSyncState cursor update
   the Samsara API — only pilot events are fetched from the stream.
 
 * Stale cursor recovery: on Samsara 4xx for expired cursor, cursor is cleared and
-  the next cron run bootstraps from the last 24 hours.
+  the next sync run (on-demand or manual) bootstraps from the last 24 hours.
+
+* `ProviderSyncState.syncLockedAt`: DB-backed concurrency guard for the
+  on-demand path — see "Completed 2026-07-12" above.
 
 ## Environment variables — current status
 
@@ -350,15 +445,17 @@ Both are configured. Validation complete.
 ### SAMSARA_API_TOKEN
 
 **Configured locally (.env.local) and verified against real Samsara org.**
+**Confirmed present in Vercel Environment Variables (production deploy uses it).**
 
 Token requires **Read Safety Events & Scores** permission (Safety & Cameras
-category). Must also be added to Vercel Environment Variables for deployment.
+category).
 
 ### CRON_SECRET
 
-**Configured locally (.env.local).** Must also be added to Vercel Environment
-Variables. Vercel Cron injects it automatically as `Authorization: Bearer
-$CRON_SECRET` once the cron entry is restored.
+**Configured locally (.env.local) and in Vercel Environment Variables.**
+Still required — it protects the manual `GET /api/sync/samsara-safety-events`
+route, which remains available for ops/manual use even though nothing calls
+it on a schedule anymore.
 
 ---
 
@@ -378,9 +475,13 @@ These are verified against 3 real MobileUsage events for driver 53142293.
 
 ---
 
-## Cron entry — ready to restore
+## Cron entry — superseded, do not restore (2026-07-12)
 
-All three gates have cleared. Re-add to `vercel.json`:
+The three validation gates cleared on 2026-06-04, and this cron entry was
+briefly considered ready to restore — but on 2026-07-12 the plan changed:
+the project runs on **Vercel Hobby**, which cannot run this schedule
+reliably, so the cron approach was replaced with on-demand sync instead.
+**Do not re-add this to `vercel.json`:**
 
 ```json
 {
@@ -393,26 +494,36 @@ All three gates have cleared. Re-add to `vercel.json`:
 }
 ```
 
-Requires Vercel Pro plan for `*/5 * * * *` frequency.
+**Decision: no cron, ever, on the current plan.** The `*/5 * * * *` schedule
+requires Vercel Pro; rather than wait on a plan upgrade, the sync trigger was
+redesigned to be on-demand (see "Completed 2026-07-12" above). Revisit this
+decision only if/when the project moves to Pro and a scheduled background
+refresh becomes worth reintroducing alongside (not instead of) on-demand sync.
 
-## New files
+## Files (Phase 5A baseline + 2026-07-12 on-demand additions)
 
 ```
-lib/providers/samsara/safetyEventsStream.ts   — HTTP client
+lib/providers/samsara/safetyEventsStream.ts    — HTTP client (+ AbortSignal support, 2026-07-12)
 lib/providers/samsara/normalizeStreamEvent.ts  — stream-specific normalizer
-app/api/sync/samsara-safety-events/route.ts    — sync endpoint
-```
-
-## Modified files
-
-```
-prisma/schema.prisma                           — ProviderSyncState model; source field on RawProviderEvent
+lib/providers/samsara/syncSafetyEvents.ts      — NEW 2026-07-12: extracted, reusable sync operation
+lib/providers/samsara/onDemandSync.ts          — NEW 2026-07-12: freshness check + DB lock + timeout
+lib/providers/samsara/__tests__/onDemandSync.test.ts — NEW 2026-07-12: 10 node:test cases
+app/api/sync/samsara-safety-events/route.ts    — thinned 2026-07-12: now just auth + call shared service
+app/api/risk/route.ts                          — 2026-07-12: calls ensureFreshSamsaraSync() for pilot drivers
+prisma/schema.prisma                           — ProviderSyncState model; source field on RawProviderEvent;
+                                                  syncLockedAt added 2026-07-12
 lib/providers/samsara/normalizeEvent.ts        — exported SAMSARA_TYPE_MAP and normalizeSeverity
 lib/providers/samsara/types.ts                 — SamsaraBehaviorLabel, SamsaraSafetyStreamEvent, SamsaraSafetyStreamResponse
-vercel.json                                    — cron entry intentionally absent (pending validation gates)
+vercel.json                                    — Samsara cron entry removed 2026-07-12 (permanent, see above)
+package.json                                   — added `test` script and `tsx` devDependency, 2026-07-12
 ```
 
-Git checkpoint: (pending commit)
+Git checkpoints:
+
+```txt
+0dd814c  fix: support real Samsara safety event labels (Phase 5A baseline)
+a690a6f  feat: add on-demand Samsara sync with database lock (2026-07-12)
+```
 
 ---
 
@@ -446,6 +557,19 @@ RLS is enabled/recommended for telemetry tables.
 
 # Current Technical Debt
 
+## Data Truthfulness (top priority — see "Next Development Priority" below)
+
+1. Pilot drivers still use mock HOS.
+2. Pilot drivers still use mock speed.
+3. Pilot drivers still use mock zone risk.
+4. Weather falls back to mock if unavailable.
+5. `dataSource` currently overstates "real" because only safety events are truly live.
+6. Three `DriverEvent` types remain unscored by the risk engine:
+   * `rolling_stop`
+   * `following_distance`
+   * `forward_collision_warning`
+7. `ComplianceScore` historical persistence still requires redesign.
+
 ## High Priority
 
 * Telegram initData is not server-verified yet
@@ -463,7 +587,6 @@ RLS is enabled/recommended for telemetry tables.
 
 ## Low Priority
 
-* Mock infrastructure partially mixed with real flow
 * Some Samsara payload assumptions still marked TODO
 
 ---
@@ -525,15 +648,43 @@ bd1d62a
 
 ---
 
-# Current Development Priorities
+## On-Demand Samsara Sync (2026-07-12)
+
+Completed — see "Completed 2026-07-12: On-Demand Samsara Sync" above for full detail.
+
+Git checkpoint:
+
+```txt
+a690a6f
+```
+
+---
+
+# Next Development Priority
+
+**The next session should NOT focus on UI improvements or machine learning.**
+
+Highest priority: make the risk engine fully truthful by replacing remaining
+mock inputs for pilot drivers with real provider data (or clearly labeling
+partial-real inputs), so the displayed score accurately reflects its
+underlying data sources. See "Current Technical Debt" → "Data Truthfulness"
+above for the specific list to work through.
+
+Do not remove support for mock/demo drivers while doing this — SafeHaul must
+continue supporting both real pilot drivers and demo drivers, and the
+architecture must stay provider-neutral so additional telematics providers
+can be integrated later.
+
+---
+
+# Other Development Priorities (lower precedence than the above)
 
 Immediate priorities:
 
-1. Live dashboard event integration
-2. Real DriverEvent visibility in Audit
-3. Pilot-driver operational testing
-4. Audio alert system
-5. Real Samsara payload validation
+1. Real Samsara payload validation for HOS/speed/zone data sources (feeds the truthfulness priority above)
+2. Pilot-driver operational testing
+3. Audio alert system
+4. Live dashboard event integration refinements
 
 Mid-term priorities:
 
@@ -577,11 +728,16 @@ npm run dev
 npm run build
 npm run start
 npm run lint
+npm test
 
 npx prisma generate
 npx prisma db push
 npx prisma studio
 ```
+
+`npm test` runs `tsx --test "lib/**/__tests__/**/*.test.ts"` (Node's built-in
+test runner via `tsx`, added 2026-07-12 for the on-demand sync tests — no
+other test framework is configured).
 
 Current workflow still uses:
 

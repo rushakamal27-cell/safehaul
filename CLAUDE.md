@@ -161,6 +161,38 @@ route → service/helper → DB
 
 ---
 
+# Synchronization Strategy
+
+This project runs on the **Vercel Hobby plan**, which cannot reliably run
+sub-daily (e.g. 5-minute) cron schedules. Do not propose or re-add a
+`*/5 * * * *` Vercel Cron entry for provider sync unless the plan has
+changed to Pro or higher — check with the user first.
+
+The current pattern for keeping provider data fresh is **on-demand sync**:
+the consuming route (e.g. `/api/risk`) checks a persisted freshness
+timestamp and triggers a shared, server-side sync function in-process (no
+HTTP round-trip to our own deployment) when data is stale. See
+`lib/providers/samsara/onDemandSync.ts` and
+`lib/providers/samsara/syncSafetyEvents.ts` for the reference
+implementation. Key properties any similar on-demand sync should preserve:
+
+* The sync operation itself lives in a reusable function, not inline in a
+  route handler, so both a manual/cron-style endpoint and the on-demand
+  caller share one implementation.
+* Concurrency guards must be **database-backed**, not in-memory — separate
+  serverless instances do not share process memory. Prefer an atomic
+  `create()` with an explicit unique-constraint-violation fallback to an
+  atomic `updateMany()`/`UPDATE ... WHERE` claim, over relying on `upsert()`'s
+  internal atomicity.
+* Bound the wait with an `AbortController` timeout sized to leave headroom
+  under the platform's function execution limit, and always release any
+  lock in `finally`.
+* A freshness timestamp must only be updated after a *fully successful*
+  sync — never on partial progress — or a failed/timed-out sync can make
+  stale data look fresh to the next caller.
+
+---
+
 # Database Philosophy
 
 * Database is the operational source of truth.
@@ -200,11 +232,17 @@ npm run dev
 npm run build
 npm run start
 npm run lint
+npm test
 
 npx prisma generate
 npx prisma db push
 npx prisma studio
 ```
+
+`npm test` runs `tsx --test "lib/**/__tests__/**/*.test.ts"` — Node's
+built-in test runner via the `tsx` devDependency. No other test framework
+is configured; keep using this pattern for new server-side logic tests
+unless the project adopts a full framework later.
 
 Current workflow uses:
 
