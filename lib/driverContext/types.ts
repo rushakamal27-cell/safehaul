@@ -47,3 +47,27 @@ export interface DriverContext {
   weather: DriverContextField<number>;
   zoneRisk: DriverContextField<number>;
 }
+
+/** DriverContextField metadata with the value stripped — what's safe to expose over the API without duplicating lib/riskEngine's `input`. */
+export interface ContextSourceMeta {
+  origin: FieldOrigin | null;
+  state: FieldState;
+  provider: ProviderId;
+  observedAt: string | null;
+}
+
+export interface ContextSources {
+  safetyEvents: ContextSourceMeta;
+  hos: ContextSourceMeta;
+  speed: ContextSourceMeta;
+  weather: ContextSourceMeta;
+  zoneRisk: ContextSourceMeta;
+}
+
+/**
+ * Backend-derived summary of how truthful/complete the current score inputs
+ * are — independent of `dataSource`, which only says whether the driver is
+ * on a real pilot provider path. See lib/driverContext/contextStatus.ts for
+ * the derivation rules.
+ */
+export type ContextStatus = "full_live" | "partial_live" | "demo";

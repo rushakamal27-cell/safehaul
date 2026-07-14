@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { RiskInput, RiskOutput } from "@/lib/riskEngine";
+import type { ContextSources, ContextStatus } from "@/lib/driverContext/types";
 import { useTelegram } from "@/lib/useTelegram";
 import type { DriverLocation } from "@/lib/location";
 import {
@@ -22,7 +23,11 @@ interface LiveData {
 interface RiskResponse {
   driverId: string;
   timestamp: string;
+  // Connection path (pilot provider vs. demo) — kept for backward
+  // compatibility. Use contextStatus for "is this score actually live".
   dataSource: "real" | "mock";
+  contextStatus: ContextStatus;
+  contextSources: ContextSources;
   liveData: LiveData | null;
   input: RiskInput;
   result: RiskOutput;
@@ -44,6 +49,103 @@ const PROVIDER_LABELS: Record<string, string> = {
   motive:  "Motive",
   geotab:  "Geotab",
 };
+
+const CONTEXT_STATUS_CONFIG: Record<ContextStatus, { color: string; statusLabel: string }> = {
+  full_live:    { color: "var(--green)",         statusLabel: "Fully live"     },
+  partial_live: { color: "var(--warning)",       statusLabel: "Partially live" },
+  demo:         { color: "var(--text-tertiary)", statusLabel: "Demo mode"      },
+};
+
+function joinWithAnd(items: string[]): string {
+  if (items.length === 0) return "";
+  if (items.length === 1) return items[0];
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
+}
+
+function capitalize(s: string): string {
+  return s.length > 0 ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+}
+
+type FieldMeta = ContextSources[keyof ContextSources];
+type SpecialFieldStatus = "live" | "cached" | "unavailable" | "fallback";
+
+/**
+ * Classifies a field for wording purposes. "cached" is real data that isn't
+ * confirmed-fresh this call — it must never read as "live" to a driver.
+ * "fallback" covers both a genuine substitution (weather's API call failed)
+ * and a field with no real source integrated yet (HOS/speed/zoneRisk) —
+ * those two cases share a state in the data model but get different
+ * sentences below because only weather/safetyEvents vary per request today.
+ */
+function classifySpecial(meta: FieldMeta): SpecialFieldStatus {
+  if (meta.state === "unavailable") return "unavailable";
+  if (meta.origin === "observed" || meta.origin === "estimated") {
+    return meta.state === "fresh" ? "live" : "cached";
+  }
+  return "fallback";
+}
+
+const GROUPED_FIELDS: { key: "hos" | "speed" | "zoneRisk"; label: string }[] = [
+  { key: "hos", label: "HOS" },
+  { key: "speed", label: "speed" },
+  { key: "zoneRisk", label: "zone risk" },
+];
+
+/**
+ * Builds the one-line "what's live vs. simulated" disclosure shown for
+ * partial_live — generated entirely from contextSources, never hardcoded.
+ * safetyEvents and weather (the two fields with real per-request
+ * variability today) get individually tailored wording; HOS/speed/zoneRisk
+ * (no real source integrated yet for any driver) are grouped generically.
+ */
+function buildPartialLiveDisclosure(sources: ContextSources): string {
+  const sentences: string[] = [];
+
+  const safetyStatus = classifySpecial(sources.safetyEvents);
+  const weatherStatus = classifySpecial(sources.weather);
+
+  if (safetyStatus === "live" && weatherStatus === "live") {
+    sentences.push("Safety events and weather live.");
+  } else {
+    switch (safetyStatus) {
+      case "live":        sentences.push("Safety events live."); break;
+      case "cached":       sentences.push("Safety events are from the latest stored sync."); break;
+      case "unavailable":  sentences.push("Safety events are currently unavailable."); break;
+      case "fallback":     sentences.push("Safety events are using fallback data."); break;
+    }
+    switch (weatherStatus) {
+      case "live":        sentences.push("Weather live."); break;
+      case "cached":       sentences.push("Weather is from the latest available reading."); break;
+      case "unavailable":  sentences.push("Weather is currently unavailable."); break;
+      case "fallback":     sentences.push("Weather is using fallback data."); break;
+    }
+  }
+
+  const liveGrouped: string[] = [];
+  const simulatedGrouped: string[] = [];
+  const unavailableGrouped: string[] = [];
+  for (const { key, label } of GROUPED_FIELDS) {
+    const status = classifySpecial(sources[key]);
+    if (status === "live" || status === "cached") liveGrouped.push(label);
+    else if (status === "unavailable") unavailableGrouped.push(label);
+    else simulatedGrouped.push(label);
+  }
+  if (liveGrouped.length > 0) {
+    const verb = liveGrouped.length === 1 ? "is" : "are";
+    sentences.push(`${capitalize(joinWithAnd(liveGrouped))} ${verb} live.`);
+  }
+  if (simulatedGrouped.length > 0) {
+    const verb = simulatedGrouped.length === 1 ? "is" : "are";
+    sentences.push(`${capitalize(joinWithAnd(simulatedGrouped))} ${verb} currently simulated.`);
+  }
+  if (unavailableGrouped.length > 0) {
+    const verb = unavailableGrouped.length === 1 ? "is" : "are";
+    sentences.push(`${capitalize(joinWithAnd(unavailableGrouped))} ${verb} currently unavailable.`);
+  }
+
+  return sentences.join(" ");
+}
 
 function formatEventType(type: string): string {
   return type.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
@@ -308,30 +410,33 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
 
             {/* Live data footer */}
             {riskData && (
-              <div
-                style={{
-                  marginTop: 20,
-                  paddingTop: 16,
-                  borderTop: "1px solid var(--border)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                }}
-              >
-                {riskData.dataSource === "real" && riskData.liveData ? (
-                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <div className="dot-pulse" style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--green)", flexShrink: 0 }} />
-                    <span style={{ fontSize: 12, fontWeight: 500, color: "var(--green)" }}>
-                      Live · {PROVIDER_LABELS[riskData.liveData.provider] ?? riskData.liveData.provider}
+              <div style={{ marginTop: 20, paddingTop: 16, borderTop: "1px solid var(--border)" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                  {riskData.contextStatus !== "demo" && riskData.liveData ? (
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <div
+                        className="dot-pulse"
+                        style={{ width: 6, height: 6, borderRadius: "50%", background: CONTEXT_STATUS_CONFIG[riskData.contextStatus].color, flexShrink: 0 }}
+                      />
+                      <span style={{ fontSize: 12, fontWeight: 500, color: CONTEXT_STATUS_CONFIG[riskData.contextStatus].color }}>
+                        {riskData.contextStatus === "full_live"
+                          ? `Live · ${PROVIDER_LABELS[riskData.liveData.provider] ?? riskData.liveData.provider}`
+                          : "Live data · Partial"}
+                      </span>
+                    </div>
+                  ) : (
+                    <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>Demo mode</span>
+                  )}
+                  {riskData.contextStatus !== "demo" && riskData.liveData && riskData.liveData.driverEventCount24h > 0 && (
+                    <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+                      {riskData.liveData.driverEventCount24h} event{riskData.liveData.driverEventCount24h !== 1 ? "s" : ""} · 24h
                     </span>
+                  )}
+                </div>
+                {riskData.contextStatus === "partial_live" && (
+                  <div style={{ fontSize: 11.5, color: "var(--text-tertiary)", marginTop: 8, lineHeight: 1.4 }}>
+                    {buildPartialLiveDisclosure(riskData.contextSources)}
                   </div>
-                ) : (
-                  <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>Demo mode</span>
-                )}
-                {riskData.dataSource === "real" && riskData.liveData && riskData.liveData.driverEventCount24h > 0 && (
-                  <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>
-                    {riskData.liveData.driverEventCount24h} event{riskData.liveData.driverEventCount24h !== 1 ? "s" : ""} · 24h
-                  </span>
                 )}
               </div>
             )}
@@ -339,8 +444,8 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
         )}
       </div>
 
-      {/* Live data detail row — only for real pilot data */}
-      {riskData?.dataSource === "real" && riskData.liveData && riskData.liveData.lastEventType && (
+      {/* Live data detail row — only for pilot data (full_live or partial_live) */}
+      {riskData && riskData.contextStatus !== "demo" && riskData.liveData && riskData.liveData.lastEventType && (
         <div
           style={{
             background: "var(--card)",
@@ -353,6 +458,8 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
           }}
         >
           {[
+            ["Provider",     PROVIDER_LABELS[riskData.liveData.provider] ?? riskData.liveData.provider],
+            ["Data status",  CONTEXT_STATUS_CONFIG[riskData.contextStatus].statusLabel],
             ["Last event",   formatEventType(riskData.liveData.lastEventType)],
             ["Event time",   riskData.liveData.lastEventTimestamp ? formatTs(riskData.liveData.lastEventTimestamp) : "—"],
             ["Last sync",    riskData.liveData.lastSyncTime ? formatTs(riskData.liveData.lastSyncTime) : "—"],

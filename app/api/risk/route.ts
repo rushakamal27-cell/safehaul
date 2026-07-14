@@ -3,6 +3,8 @@ import { calculateRisk } from "@/lib/riskEngine";
 import { getDriverVehicleContext, getDriverDailySummary } from "@/lib/samsara";
 import { assembleDriverContext } from "@/lib/driverContext/assemble";
 import { toRiskInput } from "@/lib/driverContext/toRiskInput";
+import { toContextSources } from "@/lib/driverContext/toContextSources";
+import { deriveContextStatus } from "@/lib/driverContext/contextStatus";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/lib/generated/prisma";
 import { getOrCreateTodayTrip } from "@/lib/trip";
@@ -26,6 +28,8 @@ export async function GET(request: NextRequest) {
 
   const { context, isPilot: pilotDriver, liveData } = assembled;
   const input = toRiskInput(context);
+  const contextSources = toContextSources(context);
+  const contextStatus = deriveContextStatus(context);
   const result = calculateRisk(input);
 
   // Stamp current mileage and environmental snapshot on the active trip.
@@ -93,7 +97,15 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({
     driverId,
     timestamp:  new Date().toISOString(),
+    // dataSource: which connection path this driver is on (pilot provider vs.
+    // demo). Kept for backward compatibility — do not rename/remove yet.
+    // contextStatus is the field that should be trusted for "is this score
+    // actually live": a pilot driver can be dataSource "real" while still
+    // partial_live, because HOS/speed/zoneRisk aren't sourced from a real
+    // provider yet even though safety events are.
     dataSource: pilotDriver ? "real" : "mock",
+    contextStatus,
+    contextSources,
     liveData,
     input,
     result,
