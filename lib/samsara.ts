@@ -9,9 +9,16 @@
  *     indicated by the SWAP-IN comment. Function signatures stay identical.
  *
  * Public API — stable across mock and real modes:
- *   getRiskInputForDriver(driverId)    → RiskInput      (consumed by /api/risk)
+ *   getRiskInputForDriver(driverId)    → RiskInput      (no longer used by /api/risk — see
+ *                                         lib/driverContext/assemble.ts + toRiskInput.ts for
+ *                                         the current path; retained as a standalone
+ *                                         convenience wrapper)
  *   getDriverDailySummary(driverId)    → DriverDailySummary (consumed by lib/location.ts)
  *   getDriverVehicleContext(driverId)  → DriverVehicleContext (consumed by lib/location.ts)
+ *
+ * Per-field getters (getMockDriverHos, getMockVehicleStats, getMockSafetyEvents,
+ * getMockZoneRisk, getWeatherRiskField) are also exported for lib/driverContext/assemble.ts,
+ * which needs each field individually to attach provenance metadata.
  */
 
 import { RiskInput } from "@/lib/riskEngine";
@@ -53,17 +60,17 @@ export interface SamsaraInspectionSummary {
 // shown in the SWAP-IN comment. The scenario argument disappears; use driverId.
 // ---------------------------------------------------------------------------
 
-function getMockDriverHos(scenario: MockScenario): SamsaraDriver {
+export function getMockDriverHos(scenario: MockScenario): SamsaraDriver {
   // SWAP-IN: GET https://api.samsara.com/fleet/drivers/{driverId}/hos-logs
   return { id: scenario.label, name: "Mock Driver", hosHoursUsed: scenario.hosHoursUsed };
 }
 
-function getMockVehicleStats(scenario: MockScenario): SamsaraVehicleStats {
+export function getMockVehicleStats(scenario: MockScenario): SamsaraVehicleStats {
   // SWAP-IN: GET https://api.samsara.com/fleet/vehicles/stats?driverIds={driverId}
   return { currentSpeed: scenario.currentSpeed, lat: scenario.lat, lng: scenario.lng };
 }
 
-function getMockSafetyEvents(scenario: MockScenario): SamsaraSafetyEvent[] {
+export function getMockSafetyEvents(scenario: MockScenario): SamsaraSafetyEvent[] {
   // SWAP-IN: GET https://api.samsara.com/fleet/safety-events?driverIds={driverId}
   return scenario.safetyEvents.map(e => ({ ...e }));
 }
@@ -96,26 +103,41 @@ function weatherDataToRisk(data: any): number {
   return Math.min(1, Math.round(risk * 100) / 100);
 }
 
+export interface WeatherRiskResult {
+  value: number;
+  /** true when value was sourced live from OpenWeatherMap this call; false on missing key, API error, or network failure. */
+  real: boolean;
+}
+
+/**
+ * Returns a 0–1 weather risk value plus whether it came from a live
+ * OpenWeatherMap call — the `real` flag is what lets lib/driverContext/assemble.ts
+ * attach accurate provenance (observed vs. simulated fallback).
+ */
+export async function getWeatherRiskField(scenario: MockScenario): Promise<WeatherRiskResult> {
+  const apiKey = process.env.OPENWEATHER_API_KEY;
+  if (!apiKey) return { value: scenario.weatherRisk, real: false };
+
+  try {
+    const url = `https://api.openweathermap.org/data/2.5/weather?lat=${scenario.lat}&lon=${scenario.lng}&appid=${apiKey}`;
+    const res = await fetch(url, { next: { revalidate: 300 } }); // cache 5 min
+    if (!res.ok) return { value: scenario.weatherRisk, real: false };
+    return { value: weatherDataToRisk(await res.json()), real: true };
+  } catch {
+    return { value: scenario.weatherRisk, real: false };
+  }
+}
+
 /**
  * Returns a 0–1 weather risk value.
  * Uses real OpenWeatherMap data when OPENWEATHER_API_KEY is set;
  * falls back to the scenario's mock value on missing key, API error, or network failure.
  */
 async function getWeatherRisk(scenario: MockScenario): Promise<number> {
-  const apiKey = process.env.OPENWEATHER_API_KEY;
-  if (!apiKey) return scenario.weatherRisk;
-
-  try {
-    const url = `https://api.openweathermap.org/data/2.5/weather?lat=${scenario.lat}&lon=${scenario.lng}&appid=${apiKey}`;
-    const res = await fetch(url, { next: { revalidate: 300 } }); // cache 5 min
-    if (!res.ok) return scenario.weatherRisk;
-    return weatherDataToRisk(await res.json());
-  } catch {
-    return scenario.weatherRisk;
-  }
+  return (await getWeatherRiskField(scenario)).value;
 }
 
-function getMockZoneRisk(scenario: MockScenario): number {
+export function getMockZoneRisk(scenario: MockScenario): number {
   // SWAP-IN: query internal geo-fencing service keyed on scenario.lat / scenario.lng
   return scenario.zoneRisk;
 }
