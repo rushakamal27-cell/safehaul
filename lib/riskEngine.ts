@@ -1,6 +1,10 @@
 export interface RiskInput {
   safetyEvents: { type: string; severity: number }[];
-  hosHours: number;
+  // null when HOS is genuinely unknown (e.g. a pilot driver with no
+  // resolvable/reachable Samsara HOS source this call) — must not be
+  // defaulted to a number, since 0 would silently claim "no fatigue" for a
+  // fact the engine doesn't actually have.
+  hosHours: number | null;
   weatherRisk: number; // 0–1
   zoneRisk: number;    // 0–1
   speed: number;       // mph
@@ -50,7 +54,8 @@ function calcSafetyEventPenalties(
   return { harshBraking, speeding, harshManeuver, distraction, mechanical };
 }
 
-function calcFatiguePenalty(hosHours: number): number {
+function calcFatiguePenalty(hosHours: number | null): number {
+  if (hosHours === null) return 0;
   return hosHours > 8 ? (hosHours - 8) * 2 : 0;
 }
 
@@ -129,7 +134,7 @@ function buildRecommendations(
   const recs: string[] = [];
 
   const fatigueShare = totalPenalty > 0 ? penalties.fatigue / totalPenalty : 0;
-  if (fatigueShare >= 0.2 || input.hosHours > 10) {
+  if (fatigueShare >= 0.2 || (input.hosHours !== null && input.hosHours > 10)) {
     recs.push("Consider a rest break soon.");
   }
 

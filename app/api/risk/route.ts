@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { calculateRisk } from "@/lib/riskEngine";
 import { getDriverVehicleContext, getDriverDailySummary } from "@/lib/samsara";
+import { isPilotDriver } from "@/lib/driverEvents";
 import { assembleDriverContext } from "@/lib/driverContext/assemble";
 import { toRiskInput } from "@/lib/driverContext/toRiskInput";
 import { toContextSources } from "@/lib/driverContext/toContextSources";
 import { deriveContextStatus } from "@/lib/driverContext/contextStatus";
+import { fetchTodaySummaryData } from "@/lib/todaySummary";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/lib/generated/prisma";
 import { getOrCreateTodayTrip } from "@/lib/trip";
@@ -19,18 +21,22 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const [assembled, vehicle, tripId, daily] = await Promise.all([
-    assembleDriverContext(driverId),
+  const pilotDriver = await isPilotDriver(driverId);
+
+  const [assembled, vehicle, tripId, daily, summaryData] = await Promise.all([
+    assembleDriverContext(driverId, pilotDriver),
     getDriverVehicleContext(driverId),
     getOrCreateTodayTrip(driverId),
     getDriverDailySummary(driverId),
+    fetchTodaySummaryData(driverId, pilotDriver),
   ]);
 
-  const { context, isPilot: pilotDriver, liveData } = assembled;
+  const { context, liveData, hosDetail } = assembled;
   const input = toRiskInput(context);
   const contextSources = toContextSources(context);
   const contextStatus = deriveContextStatus(context);
   const result = calculateRisk(input);
+  const alertsActive = result.factors.length;
 
   // Stamp current mileage and environmental snapshot on the active trip.
   // Both are updated on every call — mileage accumulates, conditions change.
@@ -101,12 +107,24 @@ export async function GET(request: NextRequest) {
     // demo). Kept for backward compatibility — do not rename/remove yet.
     // contextStatus is the field that should be trusted for "is this score
     // actually live": a pilot driver can be dataSource "real" while still
-    // partial_live, because HOS/speed/zoneRisk aren't sourced from a real
-    // provider yet even though safety events are.
+    // partial_live, because speed/zoneRisk aren't sourced from a real
+    // provider yet even though safety events and HOS are.
     dataSource: pilotDriver ? "real" : "mock",
     contextStatus,
     contextSources,
     liveData,
+    hos: hosDetail,
+    todaySummary: {
+      checksPassed: summaryData.checksPassed,
+      milesDriven:  summaryData.milesDriven,
+      alertsActive,
+      timezone: "UTC",
+      dataStatus: {
+        checks:   summaryData.dataStatus.checks,
+        mileage:  summaryData.dataStatus.mileage,
+        alerts:   "available",
+      },
+    },
     input,
     result,
   });

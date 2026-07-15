@@ -52,9 +52,9 @@ describe("toRiskInput", () => {
     assert.deepEqual(toRiskInput(ctx).safetyEvents, []);
   });
 
-  test("defaults unavailable hos to 0", () => {
+  test("passes through unavailable hos as null (not defaulted to 0)", () => {
     const ctx = baseContext({ hos: field({ state: "unavailable" }) });
-    assert.equal(toRiskInput(ctx).hosHours, 0);
+    assert.equal(toRiskInput(ctx).hosHours, null);
   });
 
   test("defaults unavailable weather to 0", () => {

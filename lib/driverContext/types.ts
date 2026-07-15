@@ -71,3 +71,24 @@ export interface ContextSources {
  * the derivation rules.
  */
 export type ContextStatus = "full_live" | "partial_live" | "demo";
+
+/**
+ * Transparency-only breakdown of the driver's current HOS state, exposed
+ * alongside (not instead of) DriverContext.hos. `hos.value` (the scalar fed
+ * to the risk engine via toRiskInput) is shiftHoursUsed — see
+ * lib/providers/samsara/hos.ts for why that field, not drivingHoursUsed,
+ * matches the risk engine's existing fatigue-penalty semantics.
+ *
+ * drivingHoursUsed is currently always null: Samsara's HOS clocks endpoint
+ * reports remaining driving time, not time already used, and deriving "used"
+ * from a fixed daily limit would be a guess, not an observed value — see the
+ * TODO in lib/providers/samsara/hos.ts. Left null rather than fabricated.
+ */
+export interface HosDetail {
+  drivingHoursUsed: number | null;
+  drivingHoursRemaining: number | null;
+  shiftHoursUsed: number | null;
+  status: "available" | "unavailable" | "stale";
+  source: "samsara" | "mock" | "none";
+  updatedAt: string | null;
+}

@@ -19,6 +19,8 @@
  * Per-field getters (getMockDriverHos, getMockVehicleStats, getMockSafetyEvents,
  * getMockZoneRisk, getWeatherRiskField) are also exported for lib/driverContext/assemble.ts,
  * which needs each field individually to attach provenance metadata.
+ *
+ * getMockTripStats is exported for lib/todaySummary.ts's non-pilot/demo mileage path.
  */
 
 import { RiskInput } from "@/lib/riskEngine";
@@ -142,7 +144,7 @@ export function getMockZoneRisk(scenario: MockScenario): number {
   return scenario.zoneRisk;
 }
 
-function getMockTripStats(scenario: MockScenario): SamsaraTripStats {
+export function getMockTripStats(scenario: MockScenario): SamsaraTripStats {
   // SWAP-IN: GET https://api.samsara.com/fleet/trips?driverIds={driverId}&startTime={today_midnight_utc}
   return { milesDrivenToday: scenario.milesDrivenToday };
 }

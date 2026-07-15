@@ -13,8 +13,14 @@
  *     scenario events otherwise. State reflects the on-demand sync outcome
  *     ("refreshed" → fresh, anything else → cached — stored events stay
  *     real even when a refresh attempt didn't run or failed this call).
- *   - hos / speed / zoneRisk: no real source is integrated for any driver
- *     yet. Pilot drivers get state "fallback" (a real source is expected
+ *   - hos: real Samsara HOS clocks for pilot drivers with a resolvable
+ *     mapping (see assembleHos below) — unlike speed/zoneRisk, a failed or
+ *     unresolvable pilot fetch yields value: null, state: "unavailable",
+ *     NOT a mock fallback number, per explicit product requirement ("do not
+ *     silently substitute a fake value"). Demo drivers still get a
+ *     simulated value.
+ *   - speed / zoneRisk: no real source is integrated for any driver yet.
+ *     Pilot drivers get state "fallback" (a real source is expected
  *     eventually); demo drivers get state "fresh" (intentional demo mode,
  *     not a gap).
  *   - weather: independent of pilot status — real when OPENWEATHER_API_KEY
@@ -30,13 +36,15 @@ import {
   getWeatherRiskField,
 } from "@/lib/samsara";
 import {
-  isPilotDriver,
   getRecentDriverEvents,
   driverEventsToRiskSafetyEvents,
 } from "@/lib/driverEvents";
 import { ensureFreshSamsaraSync, type OnDemandSyncStatus } from "@/lib/providers/samsara/onDemandSync";
+import { fetchSamsaraHosClocks, parseHosClockEntry } from "@/lib/providers/samsara/hos";
 import { prisma } from "@/lib/prisma";
-import type { DriverContext, DriverContextField, FieldState } from "./types";
+import type { DriverContext, DriverContextField, FieldState, HosDetail } from "./types";
+
+const HOS_FETCH_TIMEOUT_MS = 5_000;
 
 export interface DriverContextLiveData {
   provider: string;
@@ -49,9 +57,9 @@ export interface DriverContextLiveData {
 
 export interface AssembleDriverContextResult {
   context: DriverContext;
-  isPilot: boolean;
   /** null for non-pilot drivers — no sync is attempted for them. */
   liveData: DriverContextLiveData | null;
+  hosDetail: HosDetail;
 }
 
 /** Pure — labels a not-yet-integrated field: "fallback" for pilots (real source expected eventually), "fresh" for demo (intentional). */
@@ -134,17 +142,105 @@ async function assembleSafetyEvents(
   };
 }
 
-export async function assembleDriverContext(driverId: string): Promise<AssembleDriverContextResult> {
+/**
+ * Resolves real Samsara HOS for a pilot driver. Unlike simulatedField's
+ * pilot branch (a labeled placeholder for fields with no real source at
+ * all), a failed or unresolvable fetch here returns value: null,
+ * state: "unavailable" — HOS IS integrated for pilots now, so a failure
+ * must not be disguised as a mock number. shiftHoursUsed feeds the risk
+ * engine (DriverContext.hos.value); the rest of the breakdown is
+ * transparency-only (see HosDetail in ./types.ts).
+ */
+async function assembleHos(
+  driverId: string,
+  isPilot: boolean,
+  now: string
+): Promise<{ field: DriverContext["hos"]; detail: HosDetail }> {
+  if (!isPilot) {
+    const hoursUsed = getMockDriverHos(getScenarioForDriver(driverId)).hosHoursUsed;
+    return {
+      field: simulatedField(hoursUsed, false, now),
+      detail: {
+        drivingHoursUsed: null,
+        drivingHoursRemaining: null,
+        shiftHoursUsed: hoursUsed,
+        status: "available",
+        source: "mock",
+        updatedAt: now,
+      },
+    };
+  }
+
+  const unavailable = (): { field: DriverContext["hos"]; detail: HosDetail } => ({
+    field: { value: null, origin: null, state: "unavailable", provider: null, observedAt: null },
+    detail: {
+      drivingHoursUsed: null,
+      drivingHoursRemaining: null,
+      shiftHoursUsed: null,
+      status: "unavailable",
+      source: "none",
+      updatedAt: null,
+    },
+  });
+
+  const mapping = await prisma.driverProviderMapping.findFirst({
+    where: { driverId, isPilot: true, isActive: true },
+    select: { externalDriverId: true },
+  });
+  if (!mapping) return unavailable();
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), HOS_FETCH_TIMEOUT_MS);
+
+  try {
+    const response = await fetchSamsaraHosClocks({
+      driverIds: [mapping.externalDriverId],
+      signal: controller.signal,
+    });
+    const entry =
+      response.data?.find((d) => d.driver?.id === mapping.externalDriverId) ?? response.data?.[0];
+    const parsed = parseHosClockEntry(entry, new Date());
+
+    if (parsed.shiftHoursUsed === null) return unavailable();
+
+    return {
+      field: {
+        value: parsed.shiftHoursUsed,
+        origin: "observed",
+        state: parsed.status === "stale" ? "cached" : "fresh",
+        provider: "samsara",
+        observedAt: parsed.updatedAt ?? now,
+      },
+      detail: {
+        drivingHoursUsed: null,
+        drivingHoursRemaining: parsed.drivingHoursRemaining,
+        shiftHoursUsed: parsed.shiftHoursUsed,
+        status: parsed.status,
+        source: "samsara",
+        updatedAt: parsed.updatedAt,
+      },
+    };
+  } catch (err) {
+    console.error("[driverContext] Samsara HOS fetch failed:", err instanceof Error ? err.message : err);
+    return unavailable();
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+export async function assembleDriverContext(
+  driverId: string,
+  isPilot: boolean
+): Promise<AssembleDriverContextResult> {
   const now = new Date().toISOString();
-  const isPilot = await isPilotDriver(driverId);
   const scenario = getScenarioForDriver(driverId);
 
-  const [safetyEventsResult, weatherResult] = await Promise.all([
+  const [safetyEventsResult, weatherResult, hosResult] = await Promise.all([
     assembleSafetyEvents(driverId, isPilot, now),
     getWeatherRiskField(scenario),
+    assembleHos(driverId, isPilot, now),
   ]);
 
-  const hos = simulatedField(getMockDriverHos(scenario).hosHoursUsed, isPilot, now);
   const speed = simulatedField(getMockVehicleStats(scenario).currentSpeed, isPilot, now);
   const zoneRisk = simulatedField(getMockZoneRisk(scenario), isPilot, now);
 
@@ -156,12 +252,12 @@ export async function assembleDriverContext(driverId: string): Promise<AssembleD
     context: {
       driverId,
       safetyEvents: safetyEventsResult.field,
-      hos,
+      hos: hosResult.field,
       speed,
       weather,
       zoneRisk,
     },
-    isPilot,
     liveData: safetyEventsResult.liveData,
+    hosDetail: hosResult.detail,
   };
 }

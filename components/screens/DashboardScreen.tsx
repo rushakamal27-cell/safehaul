@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { RiskInput, RiskOutput } from "@/lib/riskEngine";
-import type { ContextSources, ContextStatus } from "@/lib/driverContext/types";
+import type { ContextSources, ContextStatus, HosDetail } from "@/lib/driverContext/types";
 import { useTelegram } from "@/lib/useTelegram";
 import type { DriverLocation } from "@/lib/location";
 import {
@@ -20,6 +20,18 @@ interface LiveData {
   driverEventCount24h: number;
 }
 
+interface TodaySummary {
+  checksPassed: number;
+  milesDriven: number | null;
+  alertsActive: number;
+  timezone: string;
+  dataStatus: {
+    checks: "available" | "unavailable";
+    mileage: "available" | "unavailable";
+    alerts: "available" | "unavailable";
+  };
+}
+
 interface RiskResponse {
   driverId: string;
   timestamp: string;
@@ -29,6 +41,8 @@ interface RiskResponse {
   contextStatus: ContextStatus;
   contextSources: ContextSources;
   liveData: LiveData | null;
+  hos: HosDetail;
+  todaySummary: TodaySummary;
   input: RiskInput;
   result: RiskOutput;
 }
@@ -86,8 +100,14 @@ function classifySpecial(meta: FieldMeta): SpecialFieldStatus {
   return "fallback";
 }
 
-const GROUPED_FIELDS: { key: "hos" | "speed" | "zoneRisk"; label: string }[] = [
-  { key: "hos", label: "HOS" },
+// speed/zoneRisk have no real source integrated for any driver yet, so they
+// can only ever be "fallback" (pilot) or simulated-fresh (demo) — grouped
+// generically. HOS moved out of this group once real Samsara HOS landed: it
+// can now reach live/cached/unavailable like safetyEvents/weather, so it
+// needs the same individually-tailored wording those two get (see below) —
+// otherwise a stale-but-real HOS reading would get bucketed as "live" here,
+// the same freshness-overstatement bug fixed for safetyEvents previously.
+const GROUPED_FIELDS: { key: "speed" | "zoneRisk"; label: string }[] = [
   { key: "speed", label: "speed" },
   { key: "zoneRisk", label: "zone risk" },
 ];
@@ -95,8 +115,8 @@ const GROUPED_FIELDS: { key: "hos" | "speed" | "zoneRisk"; label: string }[] = [
 /**
  * Builds the one-line "what's live vs. simulated" disclosure shown for
  * partial_live — generated entirely from contextSources, never hardcoded.
- * safetyEvents and weather (the two fields with real per-request
- * variability today) get individually tailored wording; HOS/speed/zoneRisk
+ * safetyEvents, weather, and hos (the fields with real per-request
+ * variability today) get individually tailored wording; speed/zoneRisk
  * (no real source integrated yet for any driver) are grouped generically.
  */
 function buildPartialLiveDisclosure(sources: ContextSources): string {
@@ -120,6 +140,13 @@ function buildPartialLiveDisclosure(sources: ContextSources): string {
       case "unavailable":  sentences.push("Weather is currently unavailable."); break;
       case "fallback":     sentences.push("Weather is using fallback data."); break;
     }
+  }
+
+  switch (classifySpecial(sources.hos)) {
+    case "live":        sentences.push("HOS live."); break;
+    case "cached":       sentences.push("HOS is from the latest available reading."); break;
+    case "unavailable":  sentences.push("HOS is currently unavailable."); break;
+    case "fallback":     sentences.push("HOS is currently simulated."); break;
   }
 
   const liveGrouped: string[] = [];
@@ -580,18 +607,21 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
           {[
             {
-              value: loading ? "—" : (location ? String(location.checksPassed) : "—"),
+              value: loading ? "—" : (riskData && riskData.todaySummary.dataStatus.checks === "available"
+                ? String(riskData.todaySummary.checksPassed) : "—"),
               color: "var(--green)",
               label: "Checks\npassed",
             },
             {
-              value: loading ? "—" : (location ? String(location.milesDriven) : "—"),
+              value: loading ? "—" : (riskData && riskData.todaySummary.dataStatus.mileage === "available" && riskData.todaySummary.milesDriven !== null
+                ? String(riskData.todaySummary.milesDriven) : "—"),
               color: "var(--blue)",
               label: "Miles\ndriven",
             },
             {
-              value: loading ? "—" : (riskData ? String(riskData.input.safetyEvents.length) : "—"),
-              color: riskData && riskData.input.safetyEvents.length > 0 ? "var(--warning)" : "var(--text-secondary)",
+              value: loading ? "—" : (riskData && riskData.todaySummary.dataStatus.alerts === "available"
+                ? String(riskData.todaySummary.alertsActive) : "—"),
+              color: riskData && riskData.todaySummary.alertsActive > 0 ? "var(--warning)" : "var(--text-secondary)",
               label: "Alerts\nactive",
             },
           ].map((s) => (
