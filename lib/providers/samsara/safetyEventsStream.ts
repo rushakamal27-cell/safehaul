@@ -6,11 +6,20 @@
  * GET /safety-events/stream
  *
  * Uses cursor-based pagination: call with afterCursor=undefined for the first
- * page (pass startTime instead), then pass pagination.endCursor on each
- * subsequent call until hasNextPage is false.
+ * page, then pass pagination.endCursor as afterCursor on each subsequent call
+ * until hasNextPage is false.
  *
- * TODO: Confirm the exact endpoint path against the Samsara dashboard API explorer
- *       once pilot API access is available.
+ * IMPORTANT (fixed 2026-07-18): `startTime` is REQUIRED on every request,
+ * including cursor-continuation requests — confirmed against Samsara's API
+ * reference (developers.samsara.com/reference/getsafetyeventsv2stream, which
+ * documents `after` as working *alongside* `startTime`, not replacing it) and
+ * by live testing: omitting `startTime` when `after` is set returns a 400
+ * `"startTime" is missing from query string`, even for a cursor issued
+ * moments earlier. The previous implementation treated `afterCursor` and
+ * `startTime` as mutually exclusive, which made every multi-page drain fail
+ * on page 2 with this validation error — silently misdiagnosed by the caller
+ * as an expired cursor (see syncSafetyEvents.ts for the corresponding fix).
+ * Always pass both when continuing pagination.
  */
 
 import type { SamsaraSafetyStreamResponse } from "./types";
@@ -22,13 +31,14 @@ const SAMSARA_API_BASE = "https://api.samsara.com";
 const STREAM_PATH = "/safety-events/stream";
 
 export interface FetchSafetyEventsParams {
-  /** Pagination cursor from a previous response. Mutually exclusive with startTime. */
+  /** Pagination cursor from a previous response. Sent alongside startTime, not instead of it. */
   afterCursor?: string;
   /**
-   * ISO 8601 start time — only used on the first fetch when no cursor exists.
-   * Ignored if afterCursor is provided.
+   * ISO 8601 start time — required on every request per Samsara's API
+   * (see file header). Callers should resolve one stable value per sync
+   * drain and reuse it for every page, cold-start or continuation.
    */
-  startTime?: string;
+  startTime: string;
   /**
    * Samsara external driver IDs to pre-filter the stream.
    * Passing only pilot driver IDs avoids fetching events for the whole fleet.
@@ -52,28 +62,18 @@ export class SamsaraApiError extends Error {
 }
 
 /**
- * Fetches one page of safety events from the Samsara stream.
- *
- * Throws SamsaraApiError on non-2xx responses (including stale-cursor 400/422).
- * Callers should catch SamsaraApiError and handle stale cursor by resetting state.
- *
- * Never retries — retry policy belongs in the caller (the sync route).
+ * Pure — builds the Samsara Safety Events Stream request URL. `startTime` is
+ * always included when provided; `after` is added on top of it (not instead)
+ * for continuation requests. See file header for why both are required
+ * together.
  */
-export async function fetchSamsaraSafetyEvents(
-  params: FetchSafetyEventsParams
-): Promise<SamsaraSafetyStreamResponse> {
-  const token = process.env.SAMSARA_API_TOKEN;
-  if (!token) {
-    throw new Error("[safetyEventsStream] SAMSARA_API_TOKEN is not configured");
-  }
-
+export function buildSafetyEventsStreamUrl(params: FetchSafetyEventsParams): string {
   const url = new URL(`${SAMSARA_API_BASE}${STREAM_PATH}`);
 
+  url.searchParams.set("startTime", params.startTime);
+
   if (params.afterCursor) {
-    // Cursor takes priority — startTime is ignored when a cursor is present
     url.searchParams.set("after", params.afterCursor);
-  } else if (params.startTime) {
-    url.searchParams.set("startTime", params.startTime);
   }
 
   // Filter to pilot drivers only — reduces data transfer for large fleets
@@ -85,7 +85,30 @@ export async function fetchSamsaraSafetyEvents(
   // Without this, default is updatedAtTime which would re-surface old events on edits.
   url.searchParams.set("queryByTimeField", "createdAtTime");
 
-  const response = await fetch(url.toString(), {
+  return url.toString();
+}
+
+/**
+ * Fetches one page of safety events from the Samsara stream.
+ *
+ * Throws SamsaraApiError on non-2xx responses (including genuine stale-cursor
+ * errors). Callers should catch SamsaraApiError and classify the failure
+ * (see syncSafetyEvents.ts's isCursorSpecificError) rather than assuming
+ * every 400/422 means the cursor expired.
+ *
+ * Never retries — retry policy belongs in the caller (the sync route).
+ */
+export async function fetchSamsaraSafetyEvents(
+  params: FetchSafetyEventsParams
+): Promise<SamsaraSafetyStreamResponse> {
+  const token = process.env.SAMSARA_API_TOKEN;
+  if (!token) {
+    throw new Error("[safetyEventsStream] SAMSARA_API_TOKEN is not configured");
+  }
+
+  const url = buildSafetyEventsStreamUrl(params);
+
+  const response = await fetch(url, {
     method: "GET",
     headers: {
       Authorization: `Bearer ${token}`,

@@ -156,10 +156,10 @@ model DriverProviderMapping {
 /// One row per verified POST request, regardless of whether the event was processed.
 model WebhookLog {
   id                String             @id @default(cuid())
-  provider          String             // "samsara" | future providers
-  eventType         String?            // event type extracted from payload, if available
-  externalDriverId  String?            // external driver ID extracted from payload, if available
-  rawPayload        Json               // full payload preserved for replay / debugging
+  provider          String // "samsara" | future providers
+  eventType         String? // event type extracted from payload, if available
+  externalDriverId  String? // external driver ID extracted from payload, if available
+  rawPayload        Json // full payload preserved for replay / debugging
   receivedAt        DateTime           @default(now())
   rawProviderEvents RawProviderEvent[]
 
@@ -175,10 +175,10 @@ model RawProviderEvent {
   id              String        @id @default(cuid())
   webhookLogId    String?
   webhookLog      WebhookLog?   @relation(fields: [webhookLogId], references: [id])
-  provider        String        // "samsara" | future providers
+  provider        String // "samsara" | future providers
   source          String        @default("webhook") // "webhook" | "stream"
-  externalEventId String?       // provider's deduplication ID
-  rawPayload      Json          // full raw event payload from provider
+  externalEventId String? // provider's deduplication ID
+  rawPayload      Json // full raw event payload from provider
   receivedAt      DateTime      @default(now())
   driverEvents    DriverEvent[]
 
@@ -195,14 +195,15 @@ model RawProviderEvent {
 /// One row per (provider, streamKey) pair — keyed generically so future providers
 /// (Motive, Geotab, etc.) and additional stream types share the same table.
 model ProviderSyncState {
-  id         String    @id @default(cuid())
-  provider   String    // "samsara" | future providers
-  streamKey  String    // "safety-events" | future stream identifiers
-  cursor       String?   // last endCursor from pagination; null triggers cold-start bootstrap
-  lastSyncAt   DateTime?
-  syncLockedAt DateTime? // set while an on-demand sync is claimed; stale locks are reclaimable (see lib/providers/samsara/onDemandSync.ts)
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  id              String    @id @default(cuid())
+  provider        String // "samsara" | future providers
+  streamKey       String // "safety-events" | future stream identifiers
+  cursor          String? // last endCursor from pagination; null triggers cold-start bootstrap
+  cursorStartTime DateTime? // the `startTime` window-start that `cursor` is relative to — kept in lockstep with `cursor` so a resumed drain always reuses the exact startTime the cursor was established under, never a freshly invented one. Null whenever `cursor` is null. A non-null `cursor` paired with a null `cursorStartTime` is legacy state from before this field existed (see lib/providers/samsara/syncSafetyEvents.ts for how that incomplete pair is handled safely).
+  lastSyncAt      DateTime?
+  syncLockedAt    DateTime? // set while an on-demand sync is claimed; stale locks are reclaimable (see lib/providers/samsara/onDemandSync.ts)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   @@unique([provider, streamKey])
   @@index([provider])
@@ -219,12 +220,12 @@ model DriverEvent {
   driver             Driver           @relation(fields: [driverId], references: [id])
   rawProviderEventId String
   rawProviderEvent   RawProviderEvent @relation(fields: [rawProviderEventId], references: [id])
-  provider           String           // source provider (denormalized for query convenience)
-  externalDriverId   String           // external ID at event time (audit trail)
-  externalVehicleId  String?          // external vehicle ID at event time
-  type               String           // internal event type — see DriverEventType in lib/
-  severity           Float            // normalized 1–5 scale
-  timestamp          DateTime         // event time as reported by provider
+  provider           String // source provider (denormalized for query convenience)
+  externalDriverId   String // external ID at event time (audit trail)
+  externalVehicleId  String? // external vehicle ID at event time
+  type               String // internal event type — see DriverEventType in lib/
+  severity           Float // normalized 1–5 scale
+  timestamp          DateTime // event time as reported by provider
   lat                Float?
   lng                Float?
   createdAt          DateTime         @default(now())
