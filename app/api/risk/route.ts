@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { calculateRisk } from "@/lib/riskEngine";
-import { getDriverVehicleContext, getDriverDailySummary } from "@/lib/samsara";
+import { getDriverVehicleContext } from "@/lib/samsara";
 import { isPilotDriver } from "@/lib/driverEvents";
 import { assembleDriverContext } from "@/lib/driverContext/assemble";
 import { toRiskInput } from "@/lib/driverContext/toRiskInput";
@@ -23,15 +23,14 @@ export async function GET(request: NextRequest) {
 
   const pilotDriver = await isPilotDriver(driverId);
 
-  const [assembled, vehicle, tripId, daily, summaryData] = await Promise.all([
+  const [assembled, vehicle, tripId, summaryData] = await Promise.all([
     assembleDriverContext(driverId, pilotDriver),
     getDriverVehicleContext(driverId),
     getOrCreateTodayTrip(driverId),
-    getDriverDailySummary(driverId),
     fetchTodaySummaryData(driverId, pilotDriver),
   ]);
 
-  const { context, liveData, hosDetail, locationDetail, weatherDetail } = assembled;
+  const { context, liveData, hosDetail, locationDetail, weatherDetail, zoneDetail } = assembled;
   const input = toRiskInput(context);
   const contextSources = toContextSources(context);
   const contextStatus = deriveContextStatus(context);
@@ -41,21 +40,21 @@ export async function GET(request: NextRequest) {
   // Stamp current mileage and environmental snapshot on the active trip.
   // Both are updated on every call — mileage accumulates, conditions change.
   //
-  // Phase 2 note: `vehicle` (getDriverVehicleContext) is still 100% mock
-  // scenario data — zoneRisk/zoneName stay sourced from it for everyone,
-  // since real zone risk is out of scope this phase. weatherRisk/locationLabel
-  // are different: real values now exist for pilots (weatherDetail,
-  // locationDetail), and this Trip.weatherData blob is surfaced verbatim in
-  // the Audit view (app/api/audit/route.ts's "Daily Trip" entries) — letting
-  // it keep showing mock weather/location for a pilot here would silently
-  // reintroduce the exact "real-looking but wrong" problem this phase exists
-  // to fix, even though DriverContext.weather itself is now correct.
+  // `vehicle` (getDriverVehicleContext) is still 100% mock scenario data —
+  // it remains the source for demo drivers here. For pilots, every field in
+  // this snapshot is now real (or null when unavailable): weatherRisk/
+  // locationLabel since Phase 2, zoneRisk/zoneName since Phase 3
+  // (zoneDetail). This Trip.weatherData blob is surfaced verbatim in the
+  // Audit view (app/api/audit/route.ts's "Daily Trip" entries) — letting it
+  // keep showing mock data for a pilot here would silently reintroduce the
+  // exact "real-looking but wrong" problem Phase 2 exists to fix, even
+  // though DriverContext itself is now correct.
   const weatherDataSnapshot = pilotDriver
     ? {
         weatherRisk:   weatherDetail.weatherRisk,      // real (or null when unavailable) — never the mock scenario value for a pilot
-        zoneRisk:      vehicle.zoneRisk,                // still mock — zone risk is out of scope for this phase
+        zoneRisk:      zoneDetail.zoneRisk,             // real (or null when unavailable) — never the mock scenario value for a pilot
         locationLabel: locationDetail.formattedLocation, // real reverse-geo (or null) — never the mock scenario label for a pilot
-        zoneName:      vehicle.zoneName,                // still mock — zone risk is out of scope for this phase
+        zoneName:      zoneDetail.zoneName,             // real (or null) — never the mock scenario name for a pilot
       }
     : {
         weatherRisk:   vehicle.weatherRisk,
@@ -64,10 +63,16 @@ export async function GET(request: NextRequest) {
         zoneName:      vehicle.zoneName,
       };
 
+  // milesDriven: same real-per-pilot source as todaySummary.milesDriven below
+  // (summaryData, from fetchTodaySummaryData) — previously this used a
+  // separate mock-only getDriverDailySummary() call, so the persisted Trip
+  // row silently disagreed with the real value shown in the API response.
+  // When the real value is unavailable, the field is omitted rather than
+  // written as a fabricated 0, preserving the last known real mileage.
   await prisma.trip.update({
     where: { id: tripId },
     data:  {
-      milesDriven: daily.milesDriven,
+      ...(summaryData.milesDriven !== null ? { milesDriven: summaryData.milesDriven } : {}),
       weatherData: weatherDataSnapshot,
     },
   });
@@ -126,8 +131,8 @@ export async function GET(request: NextRequest) {
     // demo). Kept for backward compatibility — do not rename/remove yet.
     // contextStatus is the field that should be trusted for "is this score
     // actually live": a pilot driver can be dataSource "real" while still
-    // partial_live, because speed/zoneRisk aren't sourced from a real
-    // provider yet even though safety events and HOS are.
+    // partial_live, because speed isn't sourced from a real provider yet
+    // even though safety events, HOS, weather, and zone risk are.
     dataSource: pilotDriver ? "real" : "mock",
     contextStatus,
     contextSources,
@@ -145,6 +150,12 @@ export async function GET(request: NextRequest) {
     // locationState/locationObservedAt explain *why* pilot weather is
     // unavailable when it is, without cross-referencing `location` above.
     weather: weatherDetail,
+    // Phase 3 — Real Zone Risk: transparency-only breakdown, same
+    // relationship to contextSources.zoneRisk that `weather` above has to
+    // contextSources.weather, and gated on location the same way.
+    // matchedZoneId/distanceMiles explain *why* a zone did or didn't match
+    // without needing to cross-reference the zone dataset separately.
+    zone: zoneDetail,
     todaySummary: {
       checksPassed: summaryData.checksPassed,
       milesDriven:  summaryData.milesDriven,

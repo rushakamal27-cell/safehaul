@@ -27,7 +27,8 @@
 
 export type FieldOrigin = "observed" | "estimated" | "simulated";
 export type FieldState = "fresh" | "cached" | "fallback" | "unavailable";
-export type ProviderId = "samsara" | "openweather" | "internal" | null;
+/** "internal" marks simulated/demo data; "internal_geofence" (Phase 3) marks a real match against SafeHaul's own bundled zone dataset — kept distinct so a real pilot result is never confused with a mock one. */
+export type ProviderId = "samsara" | "openweather" | "internal" | "internal_geofence" | null;
 
 export interface DriverContextField<T> {
   value: T | null;
@@ -181,4 +182,39 @@ export interface WeatherDetail {
   locationState: LocationState | null;
   locationObservedAt: string | null;
   conditionSummary: string | null;
+}
+
+/**
+ * Transparency-only breakdown of a driver's current Zone Risk (Phase 3 —
+ * Real Zone Risk) — same relationship to DriverContext.zoneRisk that
+ * WeatherDetail has to DriverContext.weather, and gated on location the
+ * same way (only a fresh real GPS reading may drive a lookup for a pilot;
+ * stale/unavailable location never falls back to a mock zone).
+ *
+ * Unlike weather, the underlying lookup (lib/providers/zones/zoneRisk.ts)
+ * is a pure in-process nearest-match against a bundled static dataset, not
+ * a live network call — `observedAt` is therefore always the moment the
+ * lookup ran (there's no separate upstream "observation time" to preserve,
+ * unlike OpenWeatherMap's `dt`). A real GPS position outside every defined
+ * zone's radius is a legitimate `status: "unavailable"` result — this is a
+ * v1 curated dataset, not nationwide coverage — never a fabricated default.
+ *
+ * `matchedZoneId`/`distanceMiles` exist purely for auditability: they
+ * answer "why did this zone match" without needing to cross-reference the
+ * dataset file separately.
+ */
+export interface ZoneDetail {
+  zoneRisk: number | null;
+  zoneName: string | null;
+  status: "available" | "unavailable";
+  origin: "observed" | "simulated" | null;
+  provider: "internal_geofence" | null;
+  observedAt: string | null;
+  fetchedAt: string;
+  latitude: number | null;
+  longitude: number | null;
+  locationState: LocationState | null;
+  locationObservedAt: string | null;
+  matchedZoneId: string | null;
+  distanceMiles: number | null;
 }

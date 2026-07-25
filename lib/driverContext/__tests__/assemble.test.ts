@@ -6,12 +6,16 @@ import {
   classifyLocationFreshness,
   assembleLocation,
   assembleWeather,
+  assembleZoneRisk,
   LOCATION_FRESH_THRESHOLD_MS,
   LOCATION_STALE_THRESHOLD_MS,
 } from "../assemble";
 import type { SamsaraVehicleStatsSnapshotResponse } from "../../providers/samsara/vehicleStats";
 import type { RealWeatherResult } from "../../samsara";
 import type { VehicleLocation } from "../types";
+import type { ZoneMatch } from "../../providers/zones/zoneRisk";
+import type { ZoneDefinition } from "../../providers/zones/zoneData";
+import { getScenarioForDriver } from "../../mockScenarios";
 
 // These two functions are the pure, easily-isolated pieces of assemble.ts.
 // The rest of assembleDriverContext() is thin I/O orchestration over
@@ -429,5 +433,171 @@ describe("assembleWeather", () => {
     assert.equal(typeof field.value, "number", "demo fallback still has a usable weatherRisk value");
     assert.equal(detail.status, "available");
     assert.equal(detail.origin, "simulated");
+  });
+});
+
+// assembleZoneRisk — Phase 3 (Real Zone Risk). Pilot zone risk must be
+// gated strictly on the already-assembled location's freshness (same rule
+// as weather) and must never fall back to mock/scenario zone data. Every
+// dependency is faked in-memory — no real dataset lookup, no network.
+describe("assembleZoneRisk", () => {
+  const NOW_ISO = "2026-07-22T01:33:40.000Z";
+
+  function freshLocation(overrides: Partial<VehicleLocation> = {}): VehicleLocation {
+    return {
+      latitude: 35.078091,
+      longitude: -81.721605,
+      observedAt: "2026-07-22T01:33:35.000Z",
+      fetchedAt: NOW_ISO,
+      provider: "samsara",
+      providerVehicleId: "1000000000001",
+      vehicleIdSource: "driver_event",
+      state: "fresh",
+      source: "vehicle_stats",
+      ...overrides,
+    };
+  }
+
+  function staleLocation(): VehicleLocation {
+    return freshLocation({ state: "stale", observedAt: "2026-07-22T01:03:40.000Z" });
+  }
+
+  function unavailableLocation(): VehicleLocation {
+    return {
+      latitude: null,
+      longitude: null,
+      observedAt: null,
+      fetchedAt: NOW_ISO,
+      provider: null,
+      providerVehicleId: null,
+      vehicleIdSource: "unavailable",
+      state: "unavailable",
+      source: "none",
+    };
+  }
+
+  const TEST_ZONE: ZoneDefinition = {
+    id: "test-zone",
+    name: "Test High-Risk Corridor",
+    latitude: 35.078091,
+    longitude: -81.721605,
+    radiusMiles: 10,
+    riskScore: 0.65,
+  };
+  const ZONE_MATCH: ZoneMatch = { zone: TEST_ZONE, distanceMiles: 0 };
+
+  test("pilot with fresh GPS: zone risk is looked up using the real GPS coordinates", async () => {
+    let calledWith: { latitude: number; longitude: number } | null = null;
+    const { field, detail } = await assembleZoneRisk("drv_1", true, NOW_ISO, freshLocation(), {
+      matchZone: (latitude, longitude) => {
+        calledWith = { latitude, longitude };
+        return ZONE_MATCH;
+      },
+    });
+
+    assert.deepEqual(calledWith, { latitude: 35.078091, longitude: -81.721605 });
+    assert.equal(field.origin, "observed");
+    assert.equal(field.state, "fresh");
+    assert.equal(field.provider, "internal_geofence");
+    assert.equal(field.value, 0.65);
+
+    assert.equal(detail.zoneRisk, 0.65);
+    assert.equal(detail.zoneName, "Test High-Risk Corridor");
+    assert.equal(detail.status, "available");
+    assert.equal(detail.origin, "observed");
+    assert.equal(detail.provider, "internal_geofence");
+    assert.equal(detail.latitude, 35.078091);
+    assert.equal(detail.longitude, -81.721605);
+    assert.equal(detail.locationState, "fresh");
+    assert.equal(detail.locationObservedAt, "2026-07-22T01:33:35.000Z");
+    assert.equal(detail.matchedZoneId, "test-zone");
+    assert.equal(detail.distanceMiles, 0);
+  });
+
+  test("pilot with stale GPS: zone matching is never attempted, zone risk is unavailable", async () => {
+    let called = false;
+    const { field, detail } = await assembleZoneRisk("drv_1", true, NOW_ISO, staleLocation(), {
+      matchZone: () => {
+        called = true;
+        return ZONE_MATCH;
+      },
+    });
+
+    assert.equal(called, false, "stale GPS must never drive a zone lookup");
+    assert.equal(field.value, null);
+    assert.equal(field.origin, null);
+    assert.equal(field.state, "unavailable");
+    assert.equal(detail.status, "unavailable");
+    assert.equal(detail.zoneRisk, null);
+    assert.equal(detail.latitude, null, "no coordinates were used — none should be reported as used");
+    assert.equal(detail.locationState, "stale", "the underlying GPS state is still surfaced for transparency");
+  });
+
+  test("pilot with unavailable GPS: zone matching is never attempted, zone risk is unavailable", async () => {
+    let called = false;
+    const { field, detail } = await assembleZoneRisk("drv_1", true, NOW_ISO, unavailableLocation(), {
+      matchZone: () => {
+        called = true;
+        return ZONE_MATCH;
+      },
+    });
+
+    assert.equal(called, false);
+    assert.equal(field.state, "unavailable");
+    assert.equal(detail.status, "unavailable");
+    assert.equal(detail.locationState, "unavailable");
+    assert.equal(detail.locationObservedAt, null);
+  });
+
+  test("pilot with fresh GPS but no zone match: unavailable, coordinates still reported for transparency, never simulated", async () => {
+    const { field, detail } = await assembleZoneRisk("drv_1", true, NOW_ISO, freshLocation(), {
+      matchZone: () => null,
+    });
+
+    assert.equal(field.state, "unavailable");
+    assert.equal(field.origin, null);
+    assert.notEqual(field.origin, "simulated");
+    assert.equal(detail.status, "unavailable");
+    assert.equal(detail.zoneRisk, null);
+    assert.equal(detail.zoneName, null);
+    assert.equal(detail.latitude, 35.078091, "coordinates that WERE attempted are still reported for debugging transparency");
+    assert.equal(detail.locationState, "fresh");
+    assert.equal(detail.matchedZoneId, null);
+  });
+
+  test("pilot never falls back to scenario zone data on any path", async () => {
+    const freshResult = await assembleZoneRisk("drv_1", true, NOW_ISO, freshLocation(), { matchZone: () => null });
+    assert.equal(freshResult.field.origin, null);
+    assert.notEqual(freshResult.field.origin, "simulated");
+
+    const staleResult = await assembleZoneRisk("drv_1", true, NOW_ISO, staleLocation());
+    assert.equal(staleResult.field.origin, null);
+    assert.notEqual(staleResult.field.origin, "simulated");
+
+    const unavailableResult = await assembleZoneRisk("drv_1", true, NOW_ISO, unavailableLocation());
+    assert.equal(unavailableResult.field.origin, null);
+    assert.notEqual(unavailableResult.field.origin, "simulated");
+  });
+
+  test("demo: uses scenario zoneRisk/zoneName regardless of location, simulated/fresh provenance", async () => {
+    const scenario = getScenarioForDriver("mock-driver-id");
+    let called = false;
+    const { field, detail } = await assembleZoneRisk("mock-driver-id", false, NOW_ISO, unavailableLocation(), {
+      matchZone: () => {
+        called = true;
+        return ZONE_MATCH;
+      },
+    });
+
+    assert.equal(called, false, "demo must never use the real zone dataset lookup");
+    assert.equal(field.origin, "simulated");
+    assert.equal(field.state, "fresh");
+    assert.equal(field.provider, "internal");
+    assert.equal(field.value, scenario.zoneRisk);
+    assert.equal(detail.zoneName, scenario.zoneName);
+    assert.equal(detail.status, "available");
+    assert.equal(detail.origin, "simulated");
+    assert.equal(detail.locationState, null, "demo zone risk is not gated by pilot GPS state");
+    assert.equal(detail.matchedZoneId, null);
   });
 });

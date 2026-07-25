@@ -14,15 +14,14 @@
  *     ("refreshed" → fresh, anything else → cached — stored events stay
  *     real even when a refresh attempt didn't run or failed this call).
  *   - hos: real Samsara HOS clocks for pilot drivers with a resolvable
- *     mapping (see assembleHos below) — unlike speed/zoneRisk, a failed or
+ *     mapping (see assembleHos below) — unlike speed, a failed or
  *     unresolvable pilot fetch yields value: null, state: "unavailable",
  *     NOT a mock fallback number, per explicit product requirement ("do not
  *     silently substitute a fake value"). Demo drivers still get a
  *     simulated value.
- *   - speed / zoneRisk: no real source is integrated for any driver yet.
- *     Pilot drivers get state "fallback" (a real source is expected
- *     eventually); demo drivers get state "fresh" (intentional demo mode,
- *     not a gap).
+ *   - speed: no real source is integrated for any driver yet. Pilot drivers
+ *     get state "fallback" (a real source is expected eventually); demo
+ *     drivers get state "fresh" (intentional demo mode, not a gap).
  *   - weather (Phase 2 — Weather from Real Vehicle GPS): for pilots, gated
  *     strictly on location.state === "fresh" — only a fresh real GPS
  *     reading may back a weather request; stale/unavailable location
@@ -31,6 +30,13 @@
  *     drivers are unchanged: real when OPENWEATHER_API_KEY is set and the
  *     call succeeds for the scenario's coordinates, simulated fallback
  *     otherwise.
+ *   - zoneRisk (Phase 3 — Real Zone Risk): for pilots, gated strictly on
+ *     location.state === "fresh", same rule and same reasoning as weather
+ *     — see assembleZoneRisk below. A fresh position outside every zone in
+ *     lib/providers/zones/zoneData.ts also yields "unavailable" (a v1
+ *     curated dataset, not nationwide coverage), never a fabricated
+ *     default score. Demo drivers are unchanged: scenario zoneRisk/zoneName,
+ *     simulated/fresh.
  *   - location (Phase 1 — Real GPS): real Samsara GPS for pilot drivers via
  *     the current vehicle stats snapshot (see assembleLocation below) —
  *     like hos, a failed/unresolvable/too-old pilot fetch yields value:
@@ -45,10 +51,10 @@ import {
   getMockDriverHos,
   getMockVehicleStats,
   getMockSafetyEvents,
-  getMockZoneRisk,
   getWeatherRiskField,
   type RealWeatherResult,
 } from "@/lib/samsara";
+import { matchZone, type ZoneMatch } from "@/lib/providers/zones/zoneRisk";
 import {
   getRecentDriverEvents,
   driverEventsToRiskSafetyEvents,
@@ -70,6 +76,7 @@ import type {
   LocationState,
   VehicleLocation,
   WeatherDetail,
+  ZoneDetail,
 } from "./types";
 
 const HOS_FETCH_TIMEOUT_MS = 5_000;
@@ -117,6 +124,7 @@ export interface AssembleDriverContextResult {
   hosDetail: HosDetail;
   locationDetail: VehicleLocation;
   weatherDetail: WeatherDetail;
+  zoneDetail: ZoneDetail;
 }
 
 /** Pure — labels a not-yet-integrated field: "fallback" for pilots (real source expected eventually), "fresh" for demo (intentional). */
@@ -552,6 +560,112 @@ export async function assembleWeather(
   };
 }
 
+/** Injectable seam for assembleZoneRisk, same pattern as AssembleWeatherDeps. */
+export interface AssembleZoneRiskDeps {
+  matchZone?: (latitude: number, longitude: number) => ZoneMatch | null;
+}
+
+/**
+ * Resolves zone risk using the already-assembled location (Phase 3 — Real
+ * Zone Risk). Takes locationDetail as a parameter, same dependency shape as
+ * assembleWeather — never calls the Samsara GPS endpoint independently.
+ *
+ * Pilot: only locationDetail.state === "fresh" may drive a zone lookup —
+ * identical gating to assembleWeather, for the identical reason: a position
+ * from 10+ minutes ago is not a safe stand-in for "where it is now." No
+ * match within any defined zone's radius (lib/providers/zones/zoneData.ts
+ * is a v1 curated set, not nationwide coverage) is a legitimate real
+ * "unavailable" result, never a fabricated default score.
+ *
+ * Demo: unchanged from before this phase — scenario zoneRisk/zoneName,
+ * origin "simulated", state "fresh".
+ */
+export async function assembleZoneRisk(
+  driverId: string,
+  isPilot: boolean,
+  now: string,
+  locationDetail: VehicleLocation,
+  deps: AssembleZoneRiskDeps = {}
+): Promise<{ field: DriverContext["zoneRisk"]; detail: ZoneDetail }> {
+  const matchZoneFn = deps.matchZone ?? matchZone;
+  const fetchedAt = now;
+
+  const unavailable = (
+    latitude: number | null,
+    longitude: number | null,
+    locationState: LocationState | null,
+    locationObservedAt: string | null
+  ): { field: DriverContext["zoneRisk"]; detail: ZoneDetail } => ({
+    field: { value: null, origin: null, state: "unavailable", provider: null, observedAt: null },
+    detail: {
+      zoneRisk: null,
+      zoneName: null,
+      status: "unavailable",
+      origin: null,
+      provider: null,
+      observedAt: null,
+      fetchedAt,
+      latitude,
+      longitude,
+      locationState,
+      locationObservedAt,
+      matchedZoneId: null,
+      distanceMiles: null,
+    },
+  });
+
+  if (!isPilot) {
+    const scenario = getScenarioForDriver(driverId);
+    return {
+      field: { value: scenario.zoneRisk, origin: "simulated", state: "fresh", provider: "internal", observedAt: now },
+      detail: {
+        zoneRisk: scenario.zoneRisk,
+        zoneName: scenario.zoneName,
+        status: "available",
+        origin: "simulated",
+        provider: null,
+        observedAt: now,
+        fetchedAt,
+        latitude: scenario.lat,
+        longitude: scenario.lng,
+        locationState: null,
+        locationObservedAt: null,
+        matchedZoneId: null,
+        distanceMiles: null,
+      },
+    };
+  }
+
+  // Pilot: only a fresh real GPS location may drive a zone lookup.
+  if (locationDetail.state !== "fresh" || locationDetail.latitude === null || locationDetail.longitude === null) {
+    return unavailable(null, null, locationDetail.state, locationDetail.observedAt);
+  }
+
+  const match = matchZoneFn(locationDetail.latitude, locationDetail.longitude);
+  if (!match) {
+    return unavailable(locationDetail.latitude, locationDetail.longitude, locationDetail.state, locationDetail.observedAt);
+  }
+
+  return {
+    field: { value: match.zone.riskScore, origin: "observed", state: "fresh", provider: "internal_geofence", observedAt: now },
+    detail: {
+      zoneRisk: match.zone.riskScore,
+      zoneName: match.zone.name,
+      status: "available",
+      origin: "observed",
+      provider: "internal_geofence",
+      observedAt: now,
+      fetchedAt,
+      latitude: locationDetail.latitude,
+      longitude: locationDetail.longitude,
+      locationState: locationDetail.state,
+      locationObservedAt: locationDetail.observedAt,
+      matchedZoneId: match.zone.id,
+      distanceMiles: Math.round(match.distanceMiles * 100) / 100,
+    },
+  };
+}
+
 export async function assembleDriverContext(
   driverId: string,
   isPilot: boolean
@@ -565,12 +679,15 @@ export async function assembleDriverContext(
     assembleLocation(driverId, isPilot, now),
   ]);
 
-  // Weather depends on location's result (Phase 2) — run after the above
-  // resolve, never independently re-fetching GPS.
-  const weatherResult = await assembleWeather(driverId, isPilot, now, locationResult.detail);
+  // Weather and zone risk both depend only on location's result (Phase 2 /
+  // Phase 3) — run after location resolves, never independently
+  // re-fetching GPS. They don't depend on each other, so they run together.
+  const [weatherResult, zoneRiskResult] = await Promise.all([
+    assembleWeather(driverId, isPilot, now, locationResult.detail),
+    assembleZoneRisk(driverId, isPilot, now, locationResult.detail),
+  ]);
 
   const speed = simulatedField(getMockVehicleStats(scenario).currentSpeed, isPilot, now);
-  const zoneRisk = simulatedField(getMockZoneRisk(scenario), isPilot, now);
 
   return {
     context: {
@@ -579,12 +696,13 @@ export async function assembleDriverContext(
       hos: hosResult.field,
       speed,
       weather: weatherResult.field,
-      zoneRisk,
+      zoneRisk: zoneRiskResult.field,
       location: locationResult.field,
     },
     liveData: safetyEventsResult.liveData,
     hosDetail: hosResult.detail,
     locationDetail: locationResult.detail,
     weatherDetail: weatherResult.detail,
+    zoneDetail: zoneRiskResult.detail,
   };
 }
