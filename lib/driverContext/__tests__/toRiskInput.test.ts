@@ -22,6 +22,7 @@ function baseContext(overrides: Partial<DriverContext> = {}): DriverContext {
     speed: field({ value: 62, origin: "simulated", state: "fresh", provider: "internal", observedAt: "2026-07-13T00:00:00.000Z" }),
     weather: field({ value: 0.1, origin: "simulated", state: "fresh", provider: "internal", observedAt: "2026-07-13T00:00:00.000Z" }),
     zoneRisk: field({ value: 0.1, origin: "simulated", state: "fresh", provider: "internal", observedAt: "2026-07-13T00:00:00.000Z" }),
+    location: field({ value: { latitude: 33.749, longitude: -84.388 }, origin: "simulated", state: "fresh", provider: "internal", observedAt: "2026-07-13T00:00:00.000Z" }),
     ...overrides,
   };
 }

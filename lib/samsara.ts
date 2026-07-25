@@ -17,8 +17,14 @@
  *   getDriverVehicleContext(driverId)  → DriverVehicleContext (consumed by lib/location.ts)
  *
  * Per-field getters (getMockDriverHos, getMockVehicleStats, getMockSafetyEvents,
- * getMockZoneRisk, getWeatherRiskField) are also exported for lib/driverContext/assemble.ts,
- * which needs each field individually to attach provenance metadata.
+ * getMockZoneRisk) are also exported for lib/driverContext/assemble.ts, which
+ * needs each field individually to attach provenance metadata.
+ *
+ * getWeatherRiskField (Phase 2 — Weather from Real Vehicle GPS) takes explicit
+ * coordinates, not a MockScenario — it has no concept of mock/pilot at all.
+ * lib/driverContext/assemble.ts decides which coordinates to pass (real GPS
+ * for a pilot with fresh location, scenario coordinates for demo) and what a
+ * null result means in each case.
  *
  * getMockTripStats is exported for lib/todaySummary.ts's non-pilot/demo mileage path.
  */
@@ -105,38 +111,94 @@ function weatherDataToRisk(data: any): number {
   return Math.min(1, Math.round(risk * 100) / 100);
 }
 
-export interface WeatherRiskResult {
-  value: number;
-  /** true when value was sourced live from OpenWeatherMap this call; false on missing key, API error, or network failure. */
-  real: boolean;
+export interface RealWeatherResult {
+  weatherRisk: number;
+  /** ISO 8601 UTC, converted from OpenWeatherMap's own `dt` field — never the request time. Always present when this object exists; see parseWeatherResponse. */
+  observedAt: string;
+  /** Human-readable condition, e.g. "clear sky" — from weather[0].description, when present. */
+  conditionSummary: string | null;
+}
+
+/** Precision (decimal places) coordinates are rounded to before building the OpenWeatherMap request URL — see roundWeatherCoordinate for the tradeoff. */
+export const WEATHER_COORDINATE_PRECISION = 2;
+
+/**
+ * Pure — rounds a coordinate to WEATHER_COORDINATE_PRECISION before it
+ * becomes part of the OpenWeatherMap request URL (and therefore the
+ * Next.js fetch cache key). Raw Samsara GPS precision (~6 decimals, ~11cm)
+ * would make every single reading its own unique cache key even for a
+ * stationary truck, defeating the 5-minute revalidate window entirely.
+ * 2 decimal places (~1.1km at the equator) is coarse enough for effective
+ * caching — weather doesn't meaningfully vary over that distance — while
+ * still far too fine to place a truck in a different weather system.
+ * Applied only to the outgoing request URL; DriverContext.location and
+ * VehicleLocation keep full raw precision for display/audit purposes.
+ */
+export function roundWeatherCoordinate(value: number): number {
+  const factor = 10 ** WEATHER_COORDINATE_PRECISION;
+  return Math.round(value * factor) / factor;
 }
 
 /**
- * Returns a 0–1 weather risk value plus whether it came from a live
- * OpenWeatherMap call — the `real` flag is what lets lib/driverContext/assemble.ts
- * attach accurate provenance (observed vs. simulated fallback).
+ * Pure — parses one OpenWeatherMap /data/2.5/weather response. Returns null
+ * (never a fabricated timestamp) when `dt` — the provider's own observation
+ * time — is missing or not a finite number, per the same "don't invent it"
+ * rule as every other real-data path in this codebase.
  */
-export async function getWeatherRiskField(scenario: MockScenario): Promise<WeatherRiskResult> {
+export function parseWeatherResponse(data: any): RealWeatherResult | null {
+  const dt = data?.dt;
+  if (typeof dt !== "number" || !isFinite(dt)) return null;
+
+  const description = data?.weather?.[0]?.description;
+  return {
+    weatherRisk: weatherDataToRisk(data),
+    observedAt: new Date(dt * 1000).toISOString(),
+    conditionSummary: typeof description === "string" ? description : null,
+  };
+}
+
+export interface WeatherCoordinates {
+  latitude: number;
+  longitude: number;
+  signal?: AbortSignal;
+}
+
+/**
+ * Fetches real weather risk from OpenWeatherMap for explicit coordinates.
+ * Provider-only: no MockScenario, no pilot/non-pilot awareness — those
+ * decisions belong to lib/driverContext/assemble.ts, the only place that
+ * knows whether "no real weather" should mean "fall back to a simulated
+ * value" (demo) or "unavailable" (pilot). Returns null on a missing API
+ * key, a failed/non-200 request, an unparseable body, or a missing/invalid
+ * provider observation timestamp — callers decide what null means to them.
+ */
+export async function getWeatherRiskField(params: WeatherCoordinates): Promise<RealWeatherResult | null> {
   const apiKey = process.env.OPENWEATHER_API_KEY;
-  if (!apiKey) return { value: scenario.weatherRisk, real: false };
+  if (!apiKey) return null;
+
+  const lat = roundWeatherCoordinate(params.latitude);
+  const lon = roundWeatherCoordinate(params.longitude);
 
   try {
-    const url = `https://api.openweathermap.org/data/2.5/weather?lat=${scenario.lat}&lon=${scenario.lng}&appid=${apiKey}`;
-    const res = await fetch(url, { next: { revalidate: 300 } }); // cache 5 min
-    if (!res.ok) return { value: scenario.weatherRisk, real: false };
-    return { value: weatherDataToRisk(await res.json()), real: true };
+    const url = `https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&appid=${apiKey}`;
+    const res = await fetch(url, { next: { revalidate: 300 }, signal: params.signal }); // cache 5 min
+    if (!res.ok) return null;
+    return parseWeatherResponse(await res.json());
   } catch {
-    return { value: scenario.weatherRisk, real: false };
+    return null;
   }
 }
 
 /**
- * Returns a 0–1 weather risk value.
- * Uses real OpenWeatherMap data when OPENWEATHER_API_KEY is set;
- * falls back to the scenario's mock value on missing key, API error, or network failure.
+ * Returns a 0–1 weather risk value for a mock scenario's coordinates.
+ * Uses real OpenWeatherMap data when OPENWEATHER_API_KEY is set and the
+ * call succeeds; falls back to the scenario's own mock value otherwise.
+ * Scenario-only convenience wrapper — see getWeatherRiskField for the
+ * coordinate-based provider call this is built on.
  */
 async function getWeatherRisk(scenario: MockScenario): Promise<number> {
-  return (await getWeatherRiskField(scenario)).value;
+  const result = await getWeatherRiskField({ latitude: scenario.lat, longitude: scenario.lng });
+  return result?.weatherRisk ?? scenario.weatherRisk;
 }
 
 export function getMockZoneRisk(scenario: MockScenario): number {

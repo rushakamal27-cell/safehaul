@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getMockDriverLocation } from "@/lib/location";
+import { getMockDriverLocation, getPilotDriverLocation } from "@/lib/location";
+import { isPilotDriver } from "@/lib/driverEvents";
 
 export async function GET(request: NextRequest) {
   const driverId = request.nextUrl.searchParams.get("driverId");
@@ -11,7 +12,10 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const location = await getMockDriverLocation(driverId);
+  const pilotDriver = await isPilotDriver(driverId);
+  const location = pilotDriver
+    ? await getPilotDriverLocation(driverId)
+    : await getMockDriverLocation(driverId);
 
   return NextResponse.json(location);
 }

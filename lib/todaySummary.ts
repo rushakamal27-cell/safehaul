@@ -7,10 +7,9 @@
  * result (result.factors.length), since this module has no reason to depend
  * on lib/riskEngine.
  *
- * Vehicle resolution for mileage prefers DriverProviderMapping.externalVehicleId
- * (the durable assignment) and falls back to the most recent DriverEvent's
- * externalVehicleId for pilot drivers with no mapping set yet — see
- * looksLikeSamsaraId() below for why the mapping value isn't trusted blindly.
+ * Vehicle resolution for mileage is shared with GPS location resolution via
+ * lib/providers/samsara/vehicleId.ts::resolveCurrentVehicleId — see that file
+ * for why the DriverProviderMapping value isn't trusted blindly.
  *
  * Mileage is computed via Samsara Vehicle Statistics History odometer delta,
  * not the Trips API — GET /fleet/trips and GET /fleet/vehicles/{id}/trips
@@ -29,6 +28,7 @@ import { prisma } from "@/lib/prisma";
 import { getScenarioForDriver } from "@/lib/mockScenarios";
 import { getMockTripStats } from "@/lib/samsara";
 import { fetchVehicleOdometerReadings, odometerDeltaMiles } from "@/lib/providers/samsara/vehicleStats";
+import { resolveCurrentVehicleId } from "@/lib/providers/samsara/vehicleId";
 
 const VEHICLE_STATS_FETCH_TIMEOUT_MS = 8_000;
 
@@ -67,44 +67,6 @@ async function resolveChecksPassed(
   }
 }
 
-/**
- * Samsara-issued IDs (driver, vehicle, event) have been numeric strings in
- * every example seen so far. Live validation on 2026-07-15 found the pilot
- * DriverProviderMapping's externalVehicleId held a human-readable vehicle
- * display name instead of a Samsara ID — the mapping was seeded incorrectly.
- * A non-numeric mapping value is treated the same as a missing one (fall
- * through to the DriverEvent-sourced ID) rather than being sent to Samsara,
- * where it's guaranteed to 400. This does not fix the underlying bad row —
- * that should still be corrected at the source.
- */
-function looksLikeSamsaraId(value: string): boolean {
-  return /^\d+$/.test(value);
-}
-
-/**
- * Resolves the vehicle currently assigned to a pilot driver.
- * Primary: DriverProviderMapping.externalVehicleId (durable assignment),
- * when it's Samsara-ID-shaped. Fallback: the most recent
- * DriverEvent.externalVehicleId for the driver — covers pilots whose
- * mapping row predates externalVehicleId being set correctly.
- */
-async function resolveVehicleId(driverId: string): Promise<string | null> {
-  const mapping = await prisma.driverProviderMapping.findFirst({
-    where: { driverId, isPilot: true, isActive: true },
-    select: { externalVehicleId: true },
-  });
-  if (mapping?.externalVehicleId && looksLikeSamsaraId(mapping.externalVehicleId)) {
-    return mapping.externalVehicleId;
-  }
-
-  const latestEvent = await prisma.driverEvent.findFirst({
-    where: { driverId, externalVehicleId: { not: null } },
-    orderBy: { timestamp: "desc" },
-    select: { externalVehicleId: true },
-  });
-  return latestEvent?.externalVehicleId ?? null;
-}
-
 async function resolveMilesDriven(
   driverId: string,
   isPilot: boolean,
@@ -116,7 +78,7 @@ async function resolveMilesDriven(
     return { milesDriven: Math.round(getMockTripStats(scenario).milesDrivenToday), status: "available" };
   }
 
-  const vehicleId = await resolveVehicleId(driverId);
+  const { vehicleId } = await resolveCurrentVehicleId(driverId);
   if (!vehicleId) return { milesDriven: null, status: "unavailable" };
 
   const controller = new AbortController();

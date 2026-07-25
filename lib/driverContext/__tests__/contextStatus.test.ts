@@ -29,6 +29,7 @@ function context(overrides: Partial<DriverContext> = {}): DriverContext {
     speed: field({ value: 60, ...OBSERVED_FRESH }),
     weather: field({ value: 0.2, ...OBSERVED_FRESH }),
     zoneRisk: field({ value: 0.2, ...OBSERVED_FRESH }),
+    location: field({ value: { latitude: 33.749, longitude: -84.388 }, ...OBSERVED_FRESH }),
     ...overrides,
   };
 }
@@ -85,6 +86,11 @@ describe("deriveContextStatus", () => {
       weather: field({ value: 0.42, ...OBSERVED_FRESH }),
     });
     assert.equal(deriveContextStatus(ctx), "partial_live");
+  });
+
+  test("location unavailable does not affect contextStatus (Phase 1 — location isn't in the field list yet)", () => {
+    const ctx = context({ location: field<{ latitude: number; longitude: number }>({ value: null, ...UNAVAILABLE }) });
+    assert.equal(deriveContextStatus(ctx), "full_live");
   });
 
   test("current demo DriverContext shape (everything simulated/fresh) -> demo", () => {

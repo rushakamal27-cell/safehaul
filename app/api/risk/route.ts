@@ -31,7 +31,7 @@ export async function GET(request: NextRequest) {
     fetchTodaySummaryData(driverId, pilotDriver),
   ]);
 
-  const { context, liveData, hosDetail } = assembled;
+  const { context, liveData, hosDetail, locationDetail, weatherDetail } = assembled;
   const input = toRiskInput(context);
   const contextSources = toContextSources(context);
   const contextStatus = deriveContextStatus(context);
@@ -40,16 +40,35 @@ export async function GET(request: NextRequest) {
 
   // Stamp current mileage and environmental snapshot on the active trip.
   // Both are updated on every call — mileage accumulates, conditions change.
-  await prisma.trip.update({
-    where: { id: tripId },
-    data:  {
-      milesDriven: daily.milesDriven,
-      weatherData: {
+  //
+  // Phase 2 note: `vehicle` (getDriverVehicleContext) is still 100% mock
+  // scenario data — zoneRisk/zoneName stay sourced from it for everyone,
+  // since real zone risk is out of scope this phase. weatherRisk/locationLabel
+  // are different: real values now exist for pilots (weatherDetail,
+  // locationDetail), and this Trip.weatherData blob is surfaced verbatim in
+  // the Audit view (app/api/audit/route.ts's "Daily Trip" entries) — letting
+  // it keep showing mock weather/location for a pilot here would silently
+  // reintroduce the exact "real-looking but wrong" problem this phase exists
+  // to fix, even though DriverContext.weather itself is now correct.
+  const weatherDataSnapshot = pilotDriver
+    ? {
+        weatherRisk:   weatherDetail.weatherRisk,      // real (or null when unavailable) — never the mock scenario value for a pilot
+        zoneRisk:      vehicle.zoneRisk,                // still mock — zone risk is out of scope for this phase
+        locationLabel: locationDetail.formattedLocation, // real reverse-geo (or null) — never the mock scenario label for a pilot
+        zoneName:      vehicle.zoneName,                // still mock — zone risk is out of scope for this phase
+      }
+    : {
         weatherRisk:   vehicle.weatherRisk,
         zoneRisk:      vehicle.zoneRisk,
         locationLabel: vehicle.locationLabel,
         zoneName:      vehicle.zoneName,
-      },
+      };
+
+  await prisma.trip.update({
+    where: { id: tripId },
+    data:  {
+      milesDriven: daily.milesDriven,
+      weatherData: weatherDataSnapshot,
     },
   });
 
@@ -114,6 +133,18 @@ export async function GET(request: NextRequest) {
     contextSources,
     liveData,
     hos: hosDetail,
+    // Phase 1 — Real GPS: transparency-only breakdown, same relationship to
+    // contextSources.location that `hos` above has to contextSources.hos.
+    // speedMilesPerHour is exposed for future use only — not consumed by
+    // the risk engine yet (see lib/driverContext/toRiskInput.ts).
+    location: locationDetail,
+    // Phase 2 — Weather from Real Vehicle GPS: transparency-only breakdown,
+    // same relationship to contextSources.weather that `location` above has
+    // to contextSources.location. latitude/longitude here are the
+    // coordinates a weather request actually used (or was attempted with);
+    // locationState/locationObservedAt explain *why* pilot weather is
+    // unavailable when it is, without cross-referencing `location` above.
+    weather: weatherDetail,
     todaySummary: {
       checksPassed: summaryData.checksPassed,
       milesDriven:  summaryData.milesDriven,

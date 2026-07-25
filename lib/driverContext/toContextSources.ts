@@ -25,5 +25,6 @@ export function toContextSources(context: DriverContext): ContextSources {
     speed: toMeta(context.speed),
     weather: toMeta(context.weather),
     zoneRisk: toMeta(context.zoneRisk),
+    location: toMeta(context.location),
   };
 }
