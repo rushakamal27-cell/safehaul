@@ -131,8 +131,10 @@ export async function GET(request: NextRequest) {
     // demo). Kept for backward compatibility — do not rename/remove yet.
     // contextStatus is the field that should be trusted for "is this score
     // actually live": a pilot driver can be dataSource "real" while still
-    // partial_live, because speed isn't sourced from a real provider yet
-    // even though safety events, HOS, weather, and zone risk are.
+    // partial_live if any single field (safety events, HOS, speed, weather,
+    // zone risk) isn't currently observed-and-fresh — e.g. speed/weather/
+    // zone risk all require a fresh GPS reading and go unavailable together
+    // when the truck's position is stale, even if HOS/safety events are fine.
     dataSource: pilotDriver ? "real" : "mock",
     contextStatus,
     contextSources,
@@ -140,8 +142,11 @@ export async function GET(request: NextRequest) {
     hos: hosDetail,
     // Phase 1 — Real GPS: transparency-only breakdown, same relationship to
     // contextSources.location that `hos` above has to contextSources.hos.
-    // speedMilesPerHour is exposed for future use only — not consumed by
-    // the risk engine yet (see lib/driverContext/toRiskInput.ts).
+    // speedMilesPerHour here is the same reading that now drives
+    // DriverContext.speed / input.speed (Phase 4 — Real Speed data
+    // pipeline; see lib/driverContext/assemble.ts::assembleSpeed). The
+    // scoring formula itself (lib/riskEngine.ts::calcSpeedPenalty) is
+    // unchanged this phase — only the input source changed.
     location: locationDetail,
     // Phase 2 — Weather from Real Vehicle GPS: transparency-only breakdown,
     // same relationship to contextSources.weather that `location` above has

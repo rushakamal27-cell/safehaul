@@ -7,6 +7,7 @@ import {
   assembleLocation,
   assembleWeather,
   assembleZoneRisk,
+  assembleSpeed,
   LOCATION_FRESH_THRESHOLD_MS,
   LOCATION_STALE_THRESHOLD_MS,
 } from "../assemble";
@@ -599,5 +600,98 @@ describe("assembleZoneRisk", () => {
     assert.equal(detail.origin, "simulated");
     assert.equal(detail.locationState, null, "demo zone risk is not gated by pilot GPS state");
     assert.equal(detail.matchedZoneId, null);
+  });
+});
+
+describe("assembleSpeed", () => {
+  const NOW_ISO = "2026-07-22T01:33:40.000Z";
+
+  function freshLocation(overrides: Partial<VehicleLocation> = {}): VehicleLocation {
+    return {
+      latitude: 35.078091,
+      longitude: -81.721605,
+      observedAt: "2026-07-22T01:33:35.000Z",
+      fetchedAt: NOW_ISO,
+      provider: "samsara",
+      providerVehicleId: "1000000000001",
+      vehicleIdSource: "driver_event",
+      state: "fresh",
+      source: "vehicle_stats",
+      speedMilesPerHour: 72.4,
+      isEcuSpeed: true,
+      ...overrides,
+    };
+  }
+
+  function staleLocation(): VehicleLocation {
+    return freshLocation({ state: "stale", observedAt: "2026-07-22T01:03:40.000Z" });
+  }
+
+  function unavailableLocation(): VehicleLocation {
+    return {
+      latitude: null,
+      longitude: null,
+      observedAt: null,
+      fetchedAt: NOW_ISO,
+      provider: null,
+      providerVehicleId: null,
+      vehicleIdSource: "unavailable",
+      state: "unavailable",
+      source: "none",
+    };
+  }
+
+  test("pilot with fresh GPS: speed comes from the same GPS reading's speedMilesPerHour", () => {
+    const { field } = assembleSpeed("drv_1", true, NOW_ISO, freshLocation());
+
+    assert.equal(field.value, 72.4);
+    assert.equal(field.origin, "observed");
+    assert.equal(field.state, "fresh");
+    assert.equal(field.provider, "samsara");
+    assert.equal(field.observedAt, "2026-07-22T01:33:35.000Z");
+  });
+
+  test("pilot with stale GPS: speed is unavailable, never the stale reading", () => {
+    const { field } = assembleSpeed("drv_1", true, NOW_ISO, staleLocation());
+
+    assert.equal(field.value, null);
+    assert.equal(field.origin, null);
+    assert.equal(field.state, "unavailable");
+  });
+
+  test("pilot with unavailable GPS: speed is unavailable", () => {
+    const { field } = assembleSpeed("drv_1", true, NOW_ISO, unavailableLocation());
+
+    assert.equal(field.value, null);
+    assert.equal(field.state, "unavailable");
+  });
+
+  test("pilot with fresh GPS but a null speedMilesPerHour reading: unavailable, never fabricated as 0", () => {
+    const { field } = assembleSpeed("drv_1", true, NOW_ISO, freshLocation({ speedMilesPerHour: null }));
+
+    assert.equal(field.value, null);
+    assert.equal(field.state, "unavailable");
+    assert.notEqual(field.value, 0, "a missing reading must never be reported as 0 mph");
+  });
+
+  test("pilot never falls back to simulated speed on any path", () => {
+    const freshNullSpeed = assembleSpeed("drv_1", true, NOW_ISO, freshLocation({ speedMilesPerHour: null }));
+    assert.notEqual(freshNullSpeed.field.origin, "simulated");
+
+    const stale = assembleSpeed("drv_1", true, NOW_ISO, staleLocation());
+    assert.notEqual(stale.field.origin, "simulated");
+
+    const unavailable = assembleSpeed("drv_1", true, NOW_ISO, unavailableLocation());
+    assert.notEqual(unavailable.field.origin, "simulated");
+  });
+
+  test("demo: uses scenario currentSpeed regardless of location, simulated/fresh provenance", () => {
+    const scenario = getScenarioForDriver("mock-driver-id");
+    const { field } = assembleSpeed("mock-driver-id", false, NOW_ISO, unavailableLocation());
+
+    assert.equal(field.origin, "simulated");
+    assert.equal(field.state, "fresh");
+    assert.equal(field.provider, "internal");
+    assert.equal(field.value, scenario.currentSpeed);
   });
 });

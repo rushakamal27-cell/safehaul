@@ -87,10 +87,11 @@ type SpecialFieldStatus = "live" | "cached" | "unavailable" | "fallback";
 /**
  * Classifies a field for wording purposes. "cached" is real data that isn't
  * confirmed-fresh this call — it must never read as "live" to a driver.
- * "fallback" covers both a genuine substitution (weather's API call failed)
- * and a field with no real source integrated yet (HOS/speed/zoneRisk) —
- * those two cases share a state in the data model but get different
- * sentences below because only weather/safetyEvents vary per request today.
+ * "fallback" covers both a genuine substitution (a real API call failed) and
+ * a field with no real source integrated yet — those two cases share a
+ * state in the data model but can read differently depending on which
+ * fields get individually tailored sentences vs. generic grouping (see
+ * buildPartialLiveDisclosure below).
  */
 function classifySpecial(meta: FieldMeta): SpecialFieldStatus {
   if (meta.state === "unavailable") return "unavailable";
@@ -100,13 +101,12 @@ function classifySpecial(meta: FieldMeta): SpecialFieldStatus {
   return "fallback";
 }
 
-// speed/zoneRisk have no real source integrated for any driver yet, so they
-// can only ever be "fallback" (pilot) or simulated-fresh (demo) — grouped
-// generically. HOS moved out of this group once real Samsara HOS landed: it
-// can now reach live/cached/unavailable like safetyEvents/weather, so it
-// needs the same individually-tailored wording those two get (see below) —
-// otherwise a stale-but-real HOS reading would get bucketed as "live" here,
-// the same freshness-overstatement bug fixed for safetyEvents previously.
+// speed and zoneRisk both have real sources now (Phase 3 zone risk, Phase 4
+// speed) and can reach live/cached/unavailable like safetyEvents/weather/hos
+// — they just don't get individually-tailored sentences of their own below,
+// only generic grouping. classifySpecial still reflects each one's real
+// per-request state correctly either way; grouping here is purely a wording
+// choice, not a signal that a field lacks a real source.
 const GROUPED_FIELDS: { key: "speed" | "zoneRisk"; label: string }[] = [
   { key: "speed", label: "speed" },
   { key: "zoneRisk", label: "zone risk" },
@@ -115,9 +115,8 @@ const GROUPED_FIELDS: { key: "speed" | "zoneRisk"; label: string }[] = [
 /**
  * Builds the one-line "what's live vs. simulated" disclosure shown for
  * partial_live — generated entirely from contextSources, never hardcoded.
- * safetyEvents, weather, and hos (the fields with real per-request
- * variability today) get individually tailored wording; speed/zoneRisk
- * (no real source integrated yet for any driver) are grouped generically.
+ * safetyEvents, weather, and hos get individually tailored wording; speed
+ * and zoneRisk are grouped generically (see GROUPED_FIELDS above).
  */
 function buildPartialLiveDisclosure(sources: ContextSources): string {
   const sentences: string[] = [];

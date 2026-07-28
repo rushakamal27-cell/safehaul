@@ -19,9 +19,16 @@
  *     NOT a mock fallback number, per explicit product requirement ("do not
  *     silently substitute a fake value"). Demo drivers still get a
  *     simulated value.
- *   - speed: no real source is integrated for any driver yet. Pilot drivers
- *     get state "fallback" (a real source is expected eventually); demo
- *     drivers get state "fresh" (intentional demo mode, not a gap).
+ *   - speed (Phase 4 — Real Speed data pipeline): for pilots, sourced from
+ *     the same Samsara GPS snapshot assembleLocation already fetches
+ *     (gps.speedMilesPerHour) — no separate provider call. Gated strictly on
+ *     location.state === "fresh", same reasoning as weather/zoneRisk (see
+ *     assembleSpeed below); stale/unavailable location or a null
+ *     speedMilesPerHour reading yields state "unavailable", never a mock
+ *     fallback. Demo drivers are unchanged: scenario currentSpeed,
+ *     simulated/fresh. Still feeds the existing, unchanged
+ *     calcSpeedPenalty() threshold formula in lib/riskEngine.ts — only the
+ *     input source changed this phase, not the scoring logic.
  *   - weather (Phase 2 — Weather from Real Vehicle GPS): for pilots, gated
  *     strictly on location.state === "fresh" — only a fresh real GPS
  *     reading may back a weather request; stale/unavailable location
@@ -666,12 +673,68 @@ export async function assembleZoneRisk(
   };
 }
 
+/**
+ * Resolves real vehicle speed using the already-assembled location (Phase 4
+ * — Real Speed data pipeline). Takes locationDetail as a parameter, same
+ * dependency shape as assembleWeather/assembleZoneRisk — never calls the
+ * Samsara GPS endpoint independently; speedMilesPerHour was already fetched
+ * as part of that same GPS snapshot (see vehicleStats.ts).
+ *
+ * Pilot: only locationDetail.state === "fresh" may back a real speed value.
+ * Reuses the same freshness bar as weather/zoneRisk rather than a separate
+ * threshold — a speed reading is at least as time-sensitive as those (a
+ * truck doing 75 mph a few minutes ago could be stopped now), so it should
+ * never be treated as MORE tolerant of staleness than they are. A fresh GPS
+ * reading with a null speedMilesPerHour (Samsara can omit it even inside a
+ * valid gps object) is a legitimate "unavailable," never a fabricated 0.
+ *
+ * Demo: unchanged — scenario currentSpeed, simulated/fresh.
+ *
+ * No dedicated SpeedDetail transparency block is introduced this phase:
+ * VehicleLocation (returned as `location` in the API response) already
+ * carries speedMilesPerHour/isEcuSpeed for this same underlying reading, and
+ * contextSources.speed already carries this field's provenance — a second
+ * block would duplicate both for no new information.
+ *
+ * This function only changes where DriverContext.speed's value comes from.
+ * lib/riskEngine.ts's calcSpeedPenalty() threshold formula is unchanged —
+ * a separate "Contextual Speed" phase will revisit the formula itself.
+ */
+export function assembleSpeed(
+  driverId: string,
+  isPilot: boolean,
+  now: string,
+  locationDetail: VehicleLocation
+): { field: DriverContext["speed"] } {
+  if (!isPilot) {
+    const scenario = getScenarioForDriver(driverId);
+    return { field: simulatedField(getMockVehicleStats(scenario).currentSpeed, false, now) };
+  }
+
+  if (
+    locationDetail.state !== "fresh" ||
+    locationDetail.speedMilesPerHour === null ||
+    locationDetail.speedMilesPerHour === undefined
+  ) {
+    return { field: { value: null, origin: null, state: "unavailable", provider: null, observedAt: null } };
+  }
+
+  return {
+    field: {
+      value: locationDetail.speedMilesPerHour,
+      origin: "observed",
+      state: "fresh",
+      provider: "samsara",
+      observedAt: locationDetail.observedAt,
+    },
+  };
+}
+
 export async function assembleDriverContext(
   driverId: string,
   isPilot: boolean
 ): Promise<AssembleDriverContextResult> {
   const now = new Date().toISOString();
-  const scenario = getScenarioForDriver(driverId);
 
   const [safetyEventsResult, hosResult, locationResult] = await Promise.all([
     assembleSafetyEvents(driverId, isPilot, now),
@@ -687,14 +750,15 @@ export async function assembleDriverContext(
     assembleZoneRisk(driverId, isPilot, now, locationResult.detail),
   ]);
 
-  const speed = simulatedField(getMockVehicleStats(scenario).currentSpeed, isPilot, now);
+  // Sync — no I/O of its own, reuses the GPS snapshot locationResult already fetched.
+  const speedResult = assembleSpeed(driverId, isPilot, now, locationResult.detail);
 
   return {
     context: {
       driverId,
       safetyEvents: safetyEventsResult.field,
       hos: hosResult.field,
-      speed,
+      speed: speedResult.field,
       weather: weatherResult.field,
       zoneRisk: zoneRiskResult.field,
       location: locationResult.field,
