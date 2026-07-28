@@ -58,28 +58,23 @@ const LEVEL_CONFIG: Record<string, {
   CRITICAL: { color: "var(--red)",     label: "Critical Risk", bg: "var(--red-dim)",     border: "var(--red-border)"     },
 };
 
+// Covers both liveData.provider (a raw provider id string, e.g. "samsara")
+// and ContextSources' per-field provider (which also includes the
+// non-telematics providers below) — one shared label map for both uses.
 const PROVIDER_LABELS: Record<string, string> = {
-  samsara: "Samsara",
-  motive:  "Motive",
-  geotab:  "Geotab",
+  samsara:            "Samsara",
+  motive:             "Motive",
+  geotab:             "Geotab",
+  openweather:        "OpenWeatherMap",
+  internal_geofence:  "SafeHaul Zones",
+  internal:           "Demo",
 };
 
 const CONTEXT_STATUS_CONFIG: Record<ContextStatus, { color: string; statusLabel: string }> = {
   full_live:    { color: "var(--green)",         statusLabel: "Fully live"     },
   partial_live: { color: "var(--warning)",       statusLabel: "Partially live" },
-  demo:         { color: "var(--text-tertiary)", statusLabel: "Demo mode"      },
+  demo:         { color: "var(--text-tertiary)", statusLabel: "Demo Data"      },
 };
-
-function joinWithAnd(items: string[]): string {
-  if (items.length === 0) return "";
-  if (items.length === 1) return items[0];
-  if (items.length === 2) return `${items[0]} and ${items[1]}`;
-  return `${items.slice(0, -1).join(", ")}, and ${items[items.length - 1]}`;
-}
-
-function capitalize(s: string): string {
-  return s.length > 0 ? s.charAt(0).toUpperCase() + s.slice(1) : s;
-}
 
 type FieldMeta = ContextSources[keyof ContextSources];
 type SpecialFieldStatus = "live" | "cached" | "unavailable" | "fallback";
@@ -89,9 +84,8 @@ type SpecialFieldStatus = "live" | "cached" | "unavailable" | "fallback";
  * confirmed-fresh this call — it must never read as "live" to a driver.
  * "fallback" covers both a genuine substitution (a real API call failed) and
  * a field with no real source integrated yet — those two cases share a
- * state in the data model but can read differently depending on which
- * fields get individually tailored sentences vs. generic grouping (see
- * buildPartialLiveDisclosure below).
+ * state in the data model and both render as "Demo Data" below, since
+ * either way the number on screen did not come from a live provider call.
  */
 function classifySpecial(meta: FieldMeta): SpecialFieldStatus {
   if (meta.state === "unavailable") return "unavailable";
@@ -101,76 +95,65 @@ function classifySpecial(meta: FieldMeta): SpecialFieldStatus {
   return "fallback";
 }
 
-// speed and zoneRisk both have real sources now (Phase 3 zone risk, Phase 4
-// speed) and can reach live/cached/unavailable like safetyEvents/weather/hos
-// — they just don't get individually-tailored sentences of their own below,
-// only generic grouping. classifySpecial still reflects each one's real
-// per-request state correctly either way; grouping here is purely a wording
-// choice, not a signal that a field lacks a real source.
-const GROUPED_FIELDS: { key: "speed" | "zoneRisk"; label: string }[] = [
-  { key: "speed", label: "speed" },
-  { key: "zoneRisk", label: "zone risk" },
+function providerLabel(provider: FieldMeta["provider"]): string | null {
+  if (!provider) return null;
+  return PROVIDER_LABELS[provider] ?? provider;
+}
+
+/** Whole minutes between an ISO timestamp and now; null if unparseable/absent/in the future (never shown as "-1 min old"). */
+function minutesAgo(observedAt: string | null, now: Date): number | null {
+  if (!observedAt) return null;
+  const ms = now.getTime() - new Date(observedAt).getTime();
+  if (!isFinite(ms) || ms < 0) return null;
+  return Math.round(ms / 60_000);
+}
+
+/**
+ * One consistent phrase per field, covering all four states the same way
+ * for every field — no field gets bespoke wording or generic-only grouping
+ * (Phase 5: previously safetyEvents/weather/hos had individually tailored
+ * sentences while speed/zoneRisk were only ever grouped generically, which
+ * meant the two groups could describe an identically-shaped real/live
+ * reading in different words). "Live"/"Cached" name the provider; "Cached"
+ * additionally reports how old the reading is when that's computable.
+ */
+function fieldStatusPhrase(label: string, meta: FieldMeta, now: Date): string {
+  const provider = providerLabel(meta.provider);
+  switch (classifySpecial(meta)) {
+    case "live":
+      return provider ? `${label}: Live (${provider}).` : `${label}: Live.`;
+    case "cached": {
+      const mins = minutesAgo(meta.observedAt, now);
+      const age = mins !== null ? `, ${mins} min old` : "";
+      return provider ? `${label}: Cached (${provider}${age}).` : `${label}: Cached${age ? ` (${mins} min old)` : ""}.`;
+    }
+    case "unavailable":
+      return `${label}: Unavailable.`;
+    case "fallback":
+      return `${label}: Demo Data.`;
+  }
+}
+
+const DISCLOSURE_FIELDS: { key: keyof ContextSources; label: string }[] = [
+  { key: "safetyEvents", label: "Safety events" },
+  { key: "hos",          label: "HOS" },
+  { key: "speed",        label: "Speed" },
+  { key: "weather",      label: "Weather" },
+  { key: "zoneRisk",     label: "Zone risk" },
 ];
 
 /**
- * Builds the one-line "what's live vs. simulated" disclosure shown for
- * partial_live — generated entirely from contextSources, never hardcoded.
- * safetyEvents, weather, and hos get individually tailored wording; speed
- * and zoneRisk are grouped generically (see GROUPED_FIELDS above).
+ * Builds the "what's live vs. cached vs. unavailable vs. demo" disclosure
+ * shown for partial_live — generated entirely from contextSources, never
+ * hardcoded, and every field goes through the exact same fieldStatusPhrase
+ * so none can read more or less "live" than its actual contextSources state
+ * says it is.
  */
 function buildPartialLiveDisclosure(sources: ContextSources): string {
-  const sentences: string[] = [];
-
-  const safetyStatus = classifySpecial(sources.safetyEvents);
-  const weatherStatus = classifySpecial(sources.weather);
-
-  if (safetyStatus === "live" && weatherStatus === "live") {
-    sentences.push("Safety events and weather live.");
-  } else {
-    switch (safetyStatus) {
-      case "live":        sentences.push("Safety events live."); break;
-      case "cached":       sentences.push("Safety events are from the latest stored sync."); break;
-      case "unavailable":  sentences.push("Safety events are currently unavailable."); break;
-      case "fallback":     sentences.push("Safety events are using fallback data."); break;
-    }
-    switch (weatherStatus) {
-      case "live":        sentences.push("Weather live."); break;
-      case "cached":       sentences.push("Weather is from the latest available reading."); break;
-      case "unavailable":  sentences.push("Weather is currently unavailable."); break;
-      case "fallback":     sentences.push("Weather is using fallback data."); break;
-    }
-  }
-
-  switch (classifySpecial(sources.hos)) {
-    case "live":        sentences.push("HOS live."); break;
-    case "cached":       sentences.push("HOS is from the latest available reading."); break;
-    case "unavailable":  sentences.push("HOS is currently unavailable."); break;
-    case "fallback":     sentences.push("HOS is currently simulated."); break;
-  }
-
-  const liveGrouped: string[] = [];
-  const simulatedGrouped: string[] = [];
-  const unavailableGrouped: string[] = [];
-  for (const { key, label } of GROUPED_FIELDS) {
-    const status = classifySpecial(sources[key]);
-    if (status === "live" || status === "cached") liveGrouped.push(label);
-    else if (status === "unavailable") unavailableGrouped.push(label);
-    else simulatedGrouped.push(label);
-  }
-  if (liveGrouped.length > 0) {
-    const verb = liveGrouped.length === 1 ? "is" : "are";
-    sentences.push(`${capitalize(joinWithAnd(liveGrouped))} ${verb} live.`);
-  }
-  if (simulatedGrouped.length > 0) {
-    const verb = simulatedGrouped.length === 1 ? "is" : "are";
-    sentences.push(`${capitalize(joinWithAnd(simulatedGrouped))} ${verb} currently simulated.`);
-  }
-  if (unavailableGrouped.length > 0) {
-    const verb = unavailableGrouped.length === 1 ? "is" : "are";
-    sentences.push(`${capitalize(joinWithAnd(unavailableGrouped))} ${verb} currently unavailable.`);
-  }
-
-  return sentences.join(" ");
+  const now = new Date();
+  return DISCLOSURE_FIELDS
+    .map(({ key, label }) => fieldStatusPhrase(label, sources[key], now))
+    .join(" ");
 }
 
 function formatEventType(type: string): string {
@@ -446,12 +429,12 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
                       />
                       <span style={{ fontSize: 12, fontWeight: 500, color: CONTEXT_STATUS_CONFIG[riskData.contextStatus].color }}>
                         {riskData.contextStatus === "full_live"
-                          ? `Live · ${PROVIDER_LABELS[riskData.liveData.provider] ?? riskData.liveData.provider}`
-                          : "Live data · Partial"}
+                          ? `${CONTEXT_STATUS_CONFIG.full_live.statusLabel} (${PROVIDER_LABELS[riskData.liveData.provider] ?? riskData.liveData.provider})`
+                          : CONTEXT_STATUS_CONFIG.partial_live.statusLabel}
                       </span>
                     </div>
                   ) : (
-                    <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>Demo mode</span>
+                    <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>{CONTEXT_STATUS_CONFIG.demo.statusLabel}</span>
                   )}
                   {riskData.contextStatus !== "demo" && riskData.liveData && riskData.liveData.driverEventCount24h > 0 && (
                     <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>

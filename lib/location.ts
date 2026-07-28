@@ -7,25 +7,36 @@
  * (lib/driverContext/assemble.ts):
  *   - getMockDriverLocation: non-pilot/demo drivers — unchanged, fully
  *     scenario-driven via lib/samsara.ts.
- *   - getPilotDriverLocation (Phase 2): pilot drivers — reuses
- *     lib/driverContext/assemble.ts's assembleLocation directly rather than
- *     duplicating vehicle-ID resolution / GPS-fetch / freshness logic here.
- *     lat/lng/locationLabel are real-or-null, never a mock scenario
- *     coordinate — fresh/stale/unavailable `state` matches /api/risk's
- *     location semantics exactly, by construction (same function).
+ *   - getPilotDriverLocation (Phase 2, extended Phase 5): pilot drivers —
+ *     reuses lib/driverContext/assemble.ts's assembleLocation/assembleWeather/
+ *     assembleZoneRisk/assembleSpeed directly rather than duplicating
+ *     vehicle-ID resolution / GPS-fetch / freshness / gating logic here.
+ *     lat/lng/locationLabel/zoneName/zoneRisk/currentSpeed/weatherRisk are
+ *     all real-or-null, never a mock scenario value — fresh/stale/unavailable
+ *     `state` matches /api/risk's location semantics exactly, by
+ *     construction (same assembleLocation call, and weather/zone/speed reuse
+ *     its already-resolved locationDetail rather than re-fetching GPS).
  *
- * zoneName/zoneRisk/currentSpeed/heading/weatherRisk are explicitly out of
- * scope for pilots in this phase (real zone risk and real speed scoring are
- * separate, not-yet-started phases; weather is assembled by DriverContext,
- * not duplicated here) — they are null for a pilot rather than a fabricated
- * mock value smuggled in next to genuinely real fields. checksPassed/
- * milesDriven ARE already real for pilots (lib/todaySummary.ts), so those
- * are included as-is — reusing an existing real source, not new assembly.
+ * Phase 5 note: zoneName/zoneRisk/currentSpeed/weatherRisk used to be
+ * hardcoded null for pilots here, with a comment claiming real zone risk and
+ * real speed were "not-yet-started phases" — that became stale the moment
+ * Phase 3 (zone risk) and Phase 4 (speed) shipped in /api/risk, leaving this
+ * endpoint quietly reporting "unavailable" for data that was actually live.
+ * These fields don't get their own per-field origin/state the way
+ * ContextSources does in /api/risk — they share this response's single
+ * top-level `state`, since all three are gated on that exact same
+ * locationDetail.state === "fresh" condition (see assembleWeather/
+ * assembleZoneRisk/assembleSpeed in assemble.ts). A field can still
+ * legitimately be null even when `state` is "fresh" (e.g. GPS position
+ * outside every curated zone, or a failed weather call) — that's a real
+ * per-field gap, not a mislabeled `state`. checksPassed/milesDriven ARE
+ * already real for pilots (lib/todaySummary.ts), so those are included
+ * as-is — reusing an existing real source, not new assembly.
  */
 
 import { getDriverVehicleContext, getDriverDailySummary } from "@/lib/samsara";
 import { fetchTodaySummaryData } from "@/lib/todaySummary";
-import { assembleLocation } from "@/lib/driverContext/assemble";
+import { assembleLocation, assembleWeather, assembleZoneRisk, assembleSpeed } from "@/lib/driverContext/assemble";
 import type { LocationState } from "@/lib/driverContext/types";
 
 export type CardinalHeading = "N" | "NE" | "E" | "SE" | "S" | "SW" | "W" | "NW";
@@ -35,10 +46,10 @@ export interface DriverLocation {
   lat: number | null;
   lng: number | null;
   locationLabel: string | null;   // Human-readable current location
-  zoneName: string | null;        // Named operational zone if active, else empty string (demo) or null (pilot, out of scope)
-  zoneRisk: number | null;        // Normalized 0–1 zone risk score; null for pilots (out of scope this phase)
-  currentSpeed: number | null;    // mph; null for pilots (real speed scoring out of scope this phase)
-  heading: CardinalHeading | null;
+  zoneName: string | null;        // Named operational zone if active; null when demo has none active or pilot GPS didn't match a curated zone
+  zoneRisk: number | null;        // Normalized 0–1 zone risk score; null when unavailable (demo: none active: pilot: no real match/stale GPS)
+  currentSpeed: number | null;    // mph; null when unavailable (pilot: stale/unavailable GPS or no speed reading)
+  heading: CardinalHeading | null; // TODO: real for pilots would require deriving cardinal direction from detail.headingDegrees — not done yet, still null for pilots
   weatherRisk: number | null;     // Normalized 0–1 weather risk score; null when pilot weather is unavailable
   checksPassed: number;           // Daily pre-trip / roadside inspection checks passed
   milesDriven: number | null;     // Miles driven today
@@ -75,10 +86,25 @@ export async function getMockDriverLocation(driverId: string): Promise<DriverLoc
 
 /**
  * Pilot path — reuses assembleLocation verbatim (no duplicated Samsara/
- * freshness logic). lat/lng/locationLabel are null whenever
- * assembleLocation's state is "unavailable"; they're still populated (real)
- * for "stale", for the same transparency reason DriverContext.location
- * preserves stale coordinates rather than hiding them.
+ * freshness logic), then reuses assembleWeather/assembleZoneRisk/
+ * assembleSpeed the same way assembleDriverContext does (Phase 5): each
+ * takes the already-resolved locationDetail as a parameter rather than
+ * re-fetching GPS, and each applies its own real-or-unavailable gating
+ * exactly as it does for /api/risk — this endpoint is not a second
+ * implementation of that trust logic, just a second consumer of it.
+ *
+ * lat/lng/locationLabel are null whenever assembleLocation's state is
+ * "unavailable"; they're still populated (real) for "stale", for the same
+ * transparency reason DriverContext.location preserves stale coordinates
+ * rather than hiding them. zoneName/zoneRisk/currentSpeed/weatherRisk can
+ * each independently be null (e.g. GPS outside every curated zone, or a
+ * failed weather call) even when `state` is "fresh" — see the DriverLocation
+ * field comments above.
+ *
+ * Deliberately does NOT call assembleSafetyEvents/assembleHos (i.e. not the
+ * full assembleDriverContext) — those would trigger an on-demand Samsara
+ * sync and an extra HOS call this endpoint has never made and doesn't need,
+ * just to answer a location/weather/zone/speed question.
  */
 export async function getPilotDriverLocation(driverId: string): Promise<DriverLocation> {
   const now = new Date().toISOString();
@@ -87,16 +113,22 @@ export async function getPilotDriverLocation(driverId: string): Promise<DriverLo
     fetchTodaySummaryData(driverId, true),
   ]);
 
+  const [weatherResult, zoneRiskResult] = await Promise.all([
+    assembleWeather(driverId, true, now, detail),
+    assembleZoneRisk(driverId, true, now, detail),
+  ]);
+  const speedResult = assembleSpeed(driverId, true, now, detail);
+
   return {
     driverId,
     lat:           detail.latitude,
     lng:           detail.longitude,
     locationLabel: detail.formattedLocation ?? null,
-    zoneName:      null,
-    zoneRisk:      null,
-    currentSpeed:  null,
+    zoneName:      zoneRiskResult.detail.zoneName,
+    zoneRisk:      zoneRiskResult.detail.zoneRisk,
+    currentSpeed:  speedResult.field.value,
     heading:       null,
-    weatherRisk:   null,
+    weatherRisk:   weatherResult.detail.weatherRisk,
     checksPassed:  summary.checksPassed,
     milesDriven:   summary.milesDriven,
     updatedAt:     now,
