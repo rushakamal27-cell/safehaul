@@ -19,16 +19,18 @@
  *     NOT a mock fallback number, per explicit product requirement ("do not
  *     silently substitute a fake value"). Demo drivers still get a
  *     simulated value.
- *   - speed (Phase 4 — Real Speed data pipeline): for pilots, sourced from
- *     the same Samsara GPS snapshot assembleLocation already fetches
- *     (gps.speedMilesPerHour) — no separate provider call. Gated strictly on
- *     location.state === "fresh", same reasoning as weather/zoneRisk (see
- *     assembleSpeed below); stale/unavailable location or a null
- *     speedMilesPerHour reading yields state "unavailable", never a mock
- *     fallback. Demo drivers are unchanged: scenario currentSpeed,
- *     simulated/fresh. Still feeds the existing, unchanged
- *     calcSpeedPenalty() threshold formula in lib/riskEngine.ts — only the
- *     input source changed this phase, not the scoring logic.
+ *   - speed (Phase 4 — Real Speed data pipeline; Phase 4.5 — Contextual
+ *     Speed): for pilots, sourced from the same Samsara GPS snapshot
+ *     assembleLocation already fetches (gps.speedMilesPerHour) — no separate
+ *     provider call. Gated strictly on location.state === "fresh", same
+ *     reasoning as weather/zoneRisk (see assembleSpeed below); stale/
+ *     unavailable location, a null speedMilesPerHour reading, or an
+ *     implausible one (negative, non-finite, or above lib/riskEngine.ts's
+ *     MAX_PLAUSIBLE_SPEED_MPH — corrupted telemetry, not a real fast truck)
+ *     all yield state "unavailable", never a mock fallback and never a
+ *     bogus "observed" value. Demo drivers are unchanged: scenario
+ *     currentSpeed, simulated/fresh. Feeds lib/riskEngine.ts's continuous
+ *     speed-exposure Contextual Speed model — see calculateSpeedExposure.
  *   - weather (Phase 2 — Weather from Real Vehicle GPS): for pilots, gated
  *     strictly on location.state === "fresh" — only a fresh real GPS
  *     reading may back a weather request; stale/unavailable location
@@ -54,6 +56,7 @@
  */
 
 import { getScenarioForDriver } from "@/lib/mockScenarios";
+import { isPlausibleSpeed } from "@/lib/riskEngine";
 import {
   getMockDriverHos,
   getMockVehicleStats,
@@ -688,7 +691,19 @@ export async function assembleZoneRisk(
  * reading with a null speedMilesPerHour (Samsara can omit it even inside a
  * valid gps object) is a legitimate "unavailable," never a fabricated 0.
  *
- * Demo: unchanged — scenario currentSpeed, simulated/fresh.
+ * A fresh reading that fails isPlausibleSpeed (negative, non-finite, or
+ * above lib/riskEngine.ts's MAX_PLAUSIBLE_SPEED_MPH — e.g. a GPS/sensor
+ * glitch reporting 99999 mph) is ALSO "unavailable," not "observed": this is
+ * the first of two defensive layers against corrupted telemetry (the second
+ * is calculateSpeedExposure's own re-check in riskEngine.ts). Rejecting it
+ * here, not just in the engine, means contextSources.speed correctly
+ * reports `unavailable` rather than a plausible-looking `observed`/`fresh`
+ * reading backed by a bogus number — a driver or reviewer inspecting
+ * provenance should never see "Live" next to an impossible speed.
+ *
+ * Demo: unchanged — scenario currentSpeed, simulated/fresh. Scenario speeds
+ * are trusted static constants (lib/mockScenarios.ts), not telemetry, so
+ * they're not run through isPlausibleSpeed.
  *
  * No dedicated SpeedDetail transparency block is introduced this phase:
  * VehicleLocation (returned as `location` in the API response) already
@@ -714,7 +729,8 @@ export function assembleSpeed(
   if (
     locationDetail.state !== "fresh" ||
     locationDetail.speedMilesPerHour === null ||
-    locationDetail.speedMilesPerHour === undefined
+    locationDetail.speedMilesPerHour === undefined ||
+    !isPlausibleSpeed(locationDetail.speedMilesPerHour)
   ) {
     return { field: { value: null, origin: null, state: "unavailable", provider: null, observedAt: null } };
   }

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getMockAuditEvents, AuditEvent } from "@/lib/audit";
 import { prisma } from "@/lib/prisma";
+import { isPilotDriver } from "@/lib/driverEvents";
 
 function formatAuditDate(date: Date): string {
   return `📅 ${date
@@ -29,7 +30,8 @@ export async function GET(request: NextRequest) {
   }
 
   // Fetch all real event tables in parallel
-  const [incidents, safetyEvents, complianceScores, trips, inspections, driverEventsRaw] = await Promise.all([
+  const [pilotDriver, incidents, safetyEvents, complianceScores, trips, inspections, driverEventsRaw] = await Promise.all([
+    isPilotDriver(driverId),
     prisma.incident.findMany({ where: { driverId }, orderBy: { createdAt: "desc" } }),
     prisma.safetyEvent.findMany({ where: { driverId }, orderBy: { timestamp: "desc" } }),
     prisma.complianceScore.findMany({ where: { driverId }, orderBy: { date: "desc" } }),
@@ -61,6 +63,12 @@ export async function GET(request: NextRequest) {
     },
   }));
 
+  // prisma.SafetyEvent rows are only ever written for non-pilot/demo drivers
+  // (see the `if (!pilotDriver && ...)` guard in app/api/risk/route.ts —
+  // pilot drivers' real events live in DriverEvent instead, surfaced below
+  // as driverEventItems). That makes every row here simulated data by
+  // construction, regardless of the driver's CURRENT pilot status — so this
+  // is always tagged, unconditionally, unlike the trip-snapshot tag below.
   const safetyItems: Stamped[] = safetyEvents.map((ev) => {
     const sev = parseInt(ev.severity, 10);
     const badgeType: AuditEvent["badgeType"] =
@@ -74,10 +82,11 @@ export async function GET(request: NextRequest) {
         badge,
         badgeType,
         title: formatEventType(ev.eventType),
-        detail: `Severity ${ev.severity}/5 · Recorded by the vehicle's onboard safety system.`,
+        detail: `Severity ${ev.severity}/5 · Simulated by SafeHaul's demo safety system (not real telematics).`,
         meta: [
           ...(ev.lat && ev.lng ? [`📍 GPS location recorded`] : []),
           `⚠ Severity ${ev.severity}/5`,
+          "🧪 Demo Data",
         ],
       },
     };
@@ -101,6 +110,15 @@ export async function GET(request: NextRequest) {
     };
   });
 
+  // trip.weatherData is written fresh on every /api/risk call for the
+  // driver's CURRENT pilot status (app/api/risk/route.ts's
+  // weatherDataSnapshot) — real per-field values for a pilot, fully mock
+  // scenario values for a non-pilot. There's no per-row stored flag for what
+  // it was at write time, so `pilotDriver` (current status) is used as an
+  // approximation, same simplification pattern as todaySummary's UTC-day
+  // "today" — a driver whose pilot status changed since a given trip could
+  // see it mislabeled, but that's a narrow historical edge case, not the
+  // common "is this Trip's data real" question this tag answers.
   const tripItems: Stamped[] = trips.map((trip) => {
     const weather = trip.weatherData as Record<string, any> | null;
     const miles   = trip.milesDriven > 0 ? `${trip.milesDriven} mi` : null;
@@ -123,6 +141,7 @@ export async function GET(request: NextRequest) {
           ...(weather?.zoneRisk != null
             ? [`🗺 Area Risk ${Math.round(weather.zoneRisk * 100)}%`]
             : []),
+          ...(!pilotDriver ? ["🧪 Demo Data"] : []),
         ],
       },
     };

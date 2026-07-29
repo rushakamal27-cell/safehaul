@@ -8,6 +8,18 @@ export interface RiskInput {
   weatherRisk: number; // 0–1
   zoneRisk: number;    // 0–1
   speed: number;       // mph
+  // Phase 4.5 — Contextual Speed: whether weatherRisk/zoneRisk/hosHours are a
+  // trustworthy signal (a real observed/estimated reading, or an intentional
+  // demo-mode value) rather than a data gap defaulted to 0/null upstream
+  // (lib/driverContext/toRiskInput.ts). calculateRisk() deliberately does not
+  // import lib/driverContext (see toRiskInput.ts's header comment) — these
+  // plain booleans are the seam that lets the contextual speed multiplier
+  // know a modifier's input is missing without leaking DriverContextField's
+  // origin/state vocabulary into the engine. Optional and defaulting to
+  // `true` so existing call sites/tests that don't set them are unaffected.
+  weatherAvailable?: boolean;
+  zoneRiskAvailable?: boolean;
+  hosAvailable?: boolean;
 }
 
 export interface RiskFactor {
@@ -18,12 +30,49 @@ export interface RiskFactor {
 export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 export type RiskTrend = "IMPROVING" | "STABLE" | "WORSENING";
 
+// ---------------------------------------------------------------------------
+// Contextual Speed (Phase 4.5) — explainability types
+// ---------------------------------------------------------------------------
+
+export type ContextualSpeedComponentKey = "weather" | "zone" | "fatigue" | "behavior";
+
+export interface ContextualSpeedComponent {
+  key: ContextualSpeedComponentKey;
+  label: string;
+  /** e.g. 0.4 = +40% added to the multiplier. 0 when excluded (unavailable context, or no contribution). */
+  modifier: number;
+  /** false when this component's input was unavailable and was excluded rather than silently treated as 0-risk. */
+  included: boolean;
+}
+
+export interface ContextualSpeed {
+  /** false when there's no speed exposure to amplify (speedExposure === 0) — no modifiers were computed or matter. */
+  active: boolean;
+  /**
+   * Continuous absolute kinetic exposure from current vehicle speed (Phase
+   * 4.5 refinement — see calculateSpeedExposure). NOT speeding relative to a
+   * posted or legal limit; SafeHaul has no posted-speed-limit source. Named
+   * `speedExposure` rather than `basePenalty` because it is no longer
+   * gated by a fixed mph threshold — it is nonzero (if small) starting well
+   * below highway speed, and grows continuously with no jump anywhere.
+   */
+  speedExposure: number;
+  multiplier: number;
+  finalPenalty: number;
+  /** true only when weather, zone risk, and HOS were all trustworthy inputs (see RiskInput's *Available flags). */
+  contextComplete: boolean;
+  /** Driver-facing labels for whichever inputs were unavailable, e.g. ["HOS", "Zone risk"]. Empty when contextComplete. */
+  missingContext: string[];
+  components: ContextualSpeedComponent[];
+}
+
 export interface RiskOutput {
   score: number;
   level: RiskLevel;
   trend: RiskTrend;
   factors: RiskFactor[];
   recommendations: string[];
+  contextualSpeed: ContextualSpeed;
 }
 
 // ---------------------------------------------------------------------------
@@ -67,8 +116,272 @@ function calcZonePenalty(zoneRisk: number): number {
   return zoneRisk * 15;
 }
 
-function calcSpeedPenalty(speed: number): number {
-  return speed > 70 ? (speed - 70) * 0.5 : 0;
+// ---------------------------------------------------------------------------
+// Contextual Speed (Phase 4.5, refined)
+//
+// speedExposure × contextMultiplier, where the multiplier amplifies real
+// speed exposure by conditions that make that speed more dangerous — bad
+// weather, a high-risk zone, driver fatigue, and recent distraction/harsh-
+// maneuver behavior. Deliberately NOT a multiplicative `speed × weather ×
+// zone × fatigue × behavior` formula (that can collapse toward zero or grow
+// unbounded) — see calculateContextualSpeedPenalty for the additive,
+// capped-multiplier model instead.
+//
+// speedExposure itself was originally a fixed `speed > 70 ? ... : 0` cliff.
+// That produced an arbitrary discontinuity (69 mph = 0 risk, 71 mph = risk)
+// and meant dangerous context (severe weather, a high-risk zone, a fatigued
+// driver) at 65 mph was always invisible to Contextual Speed, no matter how
+// dangerous the conditions — the threshold, not the context, decided
+// whether Contextual Speed had anything to amplify. calculateSpeedExposure
+// below replaces it with a continuous, monotonic curve so speed contributes
+// progressively and context is what decides how much that exposure matters.
+//
+// Double-counting note (Part D): harsh braking / harsh turn / mobile usage /
+// inattentive driving are ALREADY penalized directly by
+// calcSafetyEventPenalties above, independent of current speed. The behavior
+// modifier here does not add a second flat penalty for those events — it
+// only scales the *speed* penalty, and only when there IS a nonzero
+// speedExposure to scale. A distracted driver going 15 mph pays the event
+// penalty only (speedExposure is ~0, so the modifier has nothing to scale);
+// a distracted driver going 85 mph pays the event penalty AND a larger speed
+// penalty. This is intentional, not accidental double-counting: the event
+// itself is always wrong regardless of speed, but it's specifically more
+// dangerous when combined with speeding, and the multiplier's cap (see
+// MULTIPLIER_CAP below) keeps the interaction bounded.
+//
+// `speeding` events are deliberately EXCLUDED from the behavior modifier
+// (BEHAVIOR_RELEVANT_EVENT_TYPES below), unlike harsh braking/turn/
+// distraction. A Samsara "speeding" event and a high real-time GPS speed
+// reading are two observations of substantially the same underlying fact —
+// letting a speeding event also amplify the continuous speed-exposure
+// penalty would charge that one fact twice through two coupled channels.
+// Harsh braking/turn/distraction are behaviorally independent of current
+// speed (a driver can be distracted or brake harshly at any speed), so
+// amplifying speedExposure with those doesn't re-charge the same
+// measurement — it charges a genuinely separate risk factor that happens to
+// compound with speed.
+// ---------------------------------------------------------------------------
+
+/**
+ * Upper bound of physically plausible truck speed (mph) — the top anchor of
+ * SPEED_EXPOSURE_ANCHORS, not a separate/looser ceiling. A Class 8 truck
+ * reading above this is not "an extremely fast truck" for the exposure
+ * curve to score higher; it's telemetry to distrust — a GPS/sensor glitch,
+ * a unit-conversion bug, or corrupted provider data. Extending the curve
+ * further to accommodate ever-larger readings would only ever be validating
+ * bad data, never modeling real risk — see isPlausibleSpeed/
+ * calculateSpeedExposure, which reject rather than clamp above this line.
+ *
+ * No rounding tolerance is added above this boundary: Samsara reports
+ * speedMilesPerHour directly in mph (see lib/providers/samsara/
+ * vehicleStats.ts), not a unit-converted or otherwise-rounded value with an
+ * observed tendency to overshoot near real truck speeds. If a real pilot
+ * reading is ever observed landing just above 120 due to provider rounding,
+ * that observation is the evidence needed to add a small, explicitly
+ * documented tolerance — not something to guess at pre-emptively.
+ */
+export const MAX_PLAUSIBLE_SPEED_MPH = 120;
+
+/**
+ * Pure — true for a speed reading trustworthy enough to back a Contextual
+ * Speed exposure value. Negative, non-finite (NaN/±Infinity), and
+ * implausibly-large (> MAX_PLAUSIBLE_SPEED_MPH) readings are all "invalid
+ * telemetry," not "an extremely fast truck," and must never be scored as
+ * one — see calculateSpeedExposure and, for pilots, the same check applied
+ * upstream in lib/driverContext/assemble.ts::assembleSpeed so the API's own
+ * provenance (`contextSources.speed`) marks the reading `unavailable`
+ * rather than showing a plausible-looking but bogus "Live" speed.
+ */
+export function isPlausibleSpeed(speed: number): boolean {
+  return Number.isFinite(speed) && speed >= 0 && speed <= MAX_PLAUSIBLE_SPEED_MPH;
+}
+
+/**
+ * Piecewise-linear anchor points [speedMph, exposurePoints] defining the
+ * continuous speed-exposure curve — ABSOLUTE KINETIC EXPOSURE from current
+ * vehicle speed, not speeding relative to a posted or legal limit (SafeHaul
+ * has no posted-speed-limit source; see Part H). Continuous and monotonic by
+ * construction: consecutive segments share their boundary value (no jump
+ * anywhere, including at the old 70 mph cliff — see calculateSpeedExposure's
+ * tests for 69/70/71 mph producing nearby progressive values) and each
+ * segment's slope is >= 0. Domain is exactly [0, MAX_PLAUSIBLE_SPEED_MPH] —
+ * calculateSpeedExposure rejects anything outside it rather than clamping
+ * into it, so this table never needs to describe implausible speeds.
+ *   0–20 mph   → 0            parking-lot/yard movement — not highway exposure.
+ *                              A floor, not a danger threshold: it's 0 because
+ *                              that really is low kinetic exposure, and nothing
+ *                              "switches on" at 20 — the next segment starts
+ *                              at the same value (0) and rises from there.
+ *   20–45 mph  → 0 → 1.5      surface-street/ramp speeds, gently increasing.
+ *   45–65 mph  → 1.5 → 4      typical highway cruising, moderate increase.
+ *   65–120 mph → 4 → 15       highway and above, steepest slope (0.2 pts/mph).
+ * Chosen to keep speedExposure's own worst case (15, at 120 mph) in the same
+ * order of magnitude as the other single-factor budgets in this engine
+ * (weather max 20, zone max 15) — see MULTIPLIER_CAP's comment for how this
+ * interacts with the multiplier.
+ */
+const SPEED_EXPOSURE_ANCHORS: [speedMph: number, exposure: number][] = [
+  [0, 0],
+  [20, 0],
+  [45, 1.5],
+  [65, 4],
+  [MAX_PLAUSIBLE_SPEED_MPH, 15],
+];
+
+/** Pure — linear interpolation across SPEED_EXPOSURE_ANCHORS. Assumes `speed` is already known-plausible (see calculateSpeedExposure) — never called with a value outside the anchors' domain. */
+function interpolateSpeedExposure(speed: number): number {
+  for (let i = 1; i < SPEED_EXPOSURE_ANCHORS.length; i++) {
+    const [prevSpeed, prevExposure] = SPEED_EXPOSURE_ANCHORS[i - 1];
+    const [nextSpeed, nextExposure] = SPEED_EXPOSURE_ANCHORS[i];
+    if (speed <= nextSpeed) {
+      const span = nextSpeed - prevSpeed;
+      const t = span === 0 ? 0 : (speed - prevSpeed) / span;
+      return prevExposure + t * (nextExposure - prevExposure);
+    }
+  }
+  return SPEED_EXPOSURE_ANCHORS[SPEED_EXPOSURE_ANCHORS.length - 1][1];
+}
+
+/**
+ * Continuous, monotonic, bounded speed-exposure signal. Replaces the old
+ * `speed > 70 ? ... : 0` cliff (see the Contextual Speed header comment
+ * above). An implausible reading — non-finite (NaN/±Infinity), negative, or
+ * above MAX_PLAUSIBLE_SPEED_MPH — is REJECTED (treated as no signal, 0
+ * exposure), not clamped into range: a truck cannot actually be going
+ * 99999 mph, so that reading is corrupted telemetry, and scoring it as "the
+ * fastest the model can represent" would penalize a driver for a GPS/
+ * provider bug rather than for anything they did. This mirrors
+ * isPlausibleSpeed exactly and is intentionally duplicated as a second,
+ * defensive layer here (see assembleSpeed in assemble.ts for the first
+ * layer, which prevents an implausible pilot reading from ever being
+ * labeled `observed`/`fresh` in the first place) — calculateRisk has no way
+ * to know whether its caller already validated the input, so it must never
+ * assume that.
+ *
+ * `speed: 0` (RiskInput's default for unavailable speed — see
+ * toRiskInput.ts) already resolves to 0 exposure through the curve itself,
+ * so "speed unavailable" and "speed genuinely 0" both correctly produce no
+ * contextual speed penalty without any special-casing here.
+ */
+function calculateSpeedExposure(speed: number): number {
+  if (!isPlausibleSpeed(speed)) return 0;
+  return interpolateSpeedExposure(speed);
+}
+
+// Modifier weights — each is "how much this factor can add to the
+// multiplier at its own maximum," chosen so no single factor can dominate
+// and the documented cap (MULTIPLIER_CAP) is only reached when several
+// factors are simultaneously near their worst case:
+//   weather 0.50 + zone 0.40 + fatigue 0.30 + behavior 0.25 = 1.45 max combined
+//   → multiplier max ≈ 2.45, just under the 2.5 cap (see MULTIPLIER_CAP).
+const WEATHER_SPEED_WEIGHT  = 0.5;
+const ZONE_SPEED_WEIGHT     = 0.4;
+const FATIGUE_SPEED_WEIGHT  = 0.3;
+const BEHAVIOR_SPEED_WEIGHT = 0.25; // documented cap on the behavior component specifically
+
+/** HOS hours-on-duty threshold before fatigue starts counting — matches calcFatiguePenalty's own threshold, so "fatigued" means the same thing in both places. */
+const FATIGUE_HOS_THRESHOLD = 8;
+/** Hours beyond the threshold at which the fatigue modifier reaches its max (8 + 6 = 14h on duty → full weight). */
+const FATIGUE_HOS_SPAN = 6;
+
+/**
+ * Cap on the total contextMultiplier. Set just above the natural maximum of
+ * ~2.45 from the weights above — a safety ceiling against pathological
+ * inputs or future weight tuning, not a bound normally reached in practice.
+ *
+ * Re-validated (not just carried over) after replacing the fixed-threshold
+ * base penalty with calculateSpeedExposure: the multiplier's inputs
+ * (weather/zone/fatigue/behavior) are independent of how speedExposure
+ * itself is computed, so its own natural max is still exactly ~2.45 — this
+ * cap did not need to change. What DID change is speedExposure's own worst
+ * case, from ~15 (old formula, at 100 mph) to 15 (new curve, at the 120 mph
+ * clamp) — coincidentally almost identical, so the worst-case finalPenalty
+ * (speedExposure × multiplier ≈ 15 × 2.45 ≈ 37) is essentially unchanged
+ * from before this refinement, and remains well short of "overwhelming" a
+ * 100-point score on its own (see Part F's calibration table).
+ */
+const MULTIPLIER_CAP = 2.5;
+
+/**
+ * Event types treated as relevant to "recent behavior that makes speeding
+ * more dangerous." Deliberately does NOT include "speeding" — a Samsara
+ * speeding event and a high real-time GPS speed reading are two
+ * observations of essentially the same underlying fact (the vehicle was/is
+ * going too fast), so letting a speeding event also amplify speedExposure
+ * would charge that one fact twice through two coupled channels. Speeding
+ * events keep their own standalone penalty in calcSafetyEventPenalties,
+ * unchanged. Harsh braking/turn and distraction are behaviorally
+ * independent of current speed (they can happen at any speed), so they
+ * remain eligible to amplify speedExposure without re-charging the same
+ * measurement.
+ */
+const BEHAVIOR_RELEVANT_EVENT_TYPES = new Set([
+  "mobile_usage",
+  "inattentive_driving",
+  "harsh_braking",
+  "harsh_turn",
+]);
+
+function calculateWeatherSpeedModifier(weatherRisk: number, weatherAvailable: boolean): number {
+  if (!weatherAvailable) return 0;
+  return weatherRisk * WEATHER_SPEED_WEIGHT;
+}
+
+function calculateZoneSpeedModifier(zoneRisk: number, zoneRiskAvailable: boolean): number {
+  if (!zoneRiskAvailable) return 0;
+  return zoneRisk * ZONE_SPEED_WEIGHT;
+}
+
+function calculateFatigueSpeedModifier(hosHours: number | null, hosAvailable: boolean): number {
+  if (!hosAvailable || hosHours === null || hosHours <= FATIGUE_HOS_THRESHOLD) return 0;
+  const normalized = Math.min((hosHours - FATIGUE_HOS_THRESHOLD) / FATIGUE_HOS_SPAN, 1);
+  return normalized * FATIGUE_SPEED_WEIGHT;
+}
+
+/** Normalized severity-weighted sum of recent relevant events, capped at BEHAVIOR_SPEED_WEIGHT. Always "available" — safetyEvents defaults to [] rather than being unavailable, so there's no missing-context case to guard here. */
+function calculateBehaviorSpeedModifier(safetyEvents: RiskInput["safetyEvents"]): number {
+  let weight = 0;
+  for (const event of safetyEvents) {
+    if (!BEHAVIOR_RELEVANT_EVENT_TYPES.has(event.type)) continue;
+    weight += (event.severity / 5) * 0.1; // each relevant event contributes up to 0.1 at max severity
+  }
+  return Math.min(weight, BEHAVIOR_SPEED_WEIGHT);
+}
+
+function calculateContextualSpeedPenalty(input: RiskInput): ContextualSpeed {
+  const speedExposure = calculateSpeedExposure(input.speed);
+
+  const weatherAvailable  = input.weatherAvailable  ?? true;
+  const zoneRiskAvailable = input.zoneRiskAvailable ?? true;
+  const hosAvailable      = input.hosAvailable      ?? true;
+
+  const weatherModifier  = calculateWeatherSpeedModifier(input.weatherRisk, weatherAvailable);
+  const zoneModifier     = calculateZoneSpeedModifier(input.zoneRisk, zoneRiskAvailable);
+  const fatigueModifier  = calculateFatigueSpeedModifier(input.hosHours, hosAvailable);
+  const behaviorModifier = calculateBehaviorSpeedModifier(input.safetyEvents);
+
+  const rawMultiplier = 1 + weatherModifier + zoneModifier + fatigueModifier + behaviorModifier;
+  const multiplier    = Math.min(rawMultiplier, MULTIPLIER_CAP);
+
+  const missingContext: string[] = [];
+  if (!weatherAvailable)  missingContext.push("Weather");
+  if (!zoneRiskAvailable) missingContext.push("Zone risk");
+  if (!hosAvailable)      missingContext.push("HOS");
+
+  return {
+    active: speedExposure > 0,
+    speedExposure,
+    multiplier,
+    finalPenalty: speedExposure * multiplier,
+    contextComplete: missingContext.length === 0,
+    missingContext,
+    components: [
+      { key: "weather",  label: "Weather",        modifier: weatherModifier,  included: weatherAvailable },
+      { key: "zone",     label: "Risk zone",       modifier: zoneModifier,     included: zoneRiskAvailable },
+      { key: "fatigue",  label: "Fatigue",         modifier: fatigueModifier,  included: hosAvailable },
+      { key: "behavior", label: "Recent behavior", modifier: behaviorModifier, included: true },
+    ],
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -180,7 +493,9 @@ export function calculateRisk(input: RiskInput): RiskOutput {
   const fatigue = calcFatiguePenalty(input.hosHours);
   const weather = calcWeatherPenalty(input.weatherRisk);
   const zone    = calcZonePenalty(input.zoneRisk);
-  const speed   = calcSpeedPenalty(input.speed);
+
+  const contextualSpeed = calculateContextualSpeedPenalty(input);
+  const speed = contextualSpeed.finalPenalty;
 
   // All raw penalties — used for score calculation and recommendations
   const rawPenalties: Record<string, number> = {
@@ -217,5 +532,6 @@ export function calculateRisk(input: RiskInput): RiskOutput {
     trend:           "STABLE",
     factors:         buildFactors(displayPenalties),
     recommendations: buildRecommendations(input, rawPenalties, totalPenalty),
+    contextualSpeed,
   };
 }

@@ -9,7 +9,7 @@ describe("calculateRisk — null hosHours (HOS unknown)", () => {
       hosHours: null,
       weatherRisk: 0,
       zoneRisk: 0,
-      speed: 60,
+      speed: 0, // no continuous speed exposure at 0mph — isolates the hosHours behavior under test
     });
     assert.equal(result.score, 100);
     assert.deepEqual(result.factors, []);
@@ -22,7 +22,7 @@ describe("calculateRisk — null hosHours (HOS unknown)", () => {
       hosHours: null,
       weatherRisk: 0.6,
       zoneRisk: 0,
-      speed: 60,
+      speed: 0,
     });
     assert.ok(!result.factors.some((f) => f.name === "Fatigue"));
   });
@@ -35,7 +35,7 @@ describe("calculateRisk — known hosHours (unchanged behavior)", () => {
       hosHours: 12,
       weatherRisk: 0,
       zoneRisk: 0,
-      speed: 60,
+      speed: 0,
     });
     assert.ok(result.score < 100);
     assert.ok(result.factors.some((f) => f.name === "Fatigue"));
@@ -48,9 +48,272 @@ describe("calculateRisk — known hosHours (unchanged behavior)", () => {
       hosHours: 5,
       weatherRisk: 0,
       zoneRisk: 0,
-      speed: 60,
+      speed: 0,
     });
     assert.equal(result.score, 100);
     assert.deepEqual(result.factors, []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Contextual Speed (Phase 4.5) — continuous speed-exposure refinement
+//
+// Replaces the fixed `speed > 70` cliff with calculateSpeedExposure, a
+// continuous piecewise-linear curve (see lib/riskEngine.ts's Contextual
+// Speed header comment for the anchor points and rationale). Expected
+// exposure values below were verified by direct calculation against
+// SPEED_EXPOSURE_ANCHORS, not hand-guessed:
+//   0–20 mph → 0; 35 → 0.9; 45 → 1.5; 55 → 2.75; 65 → 4;
+//   69 → 4.8; 70 → 5.0; 71 → 5.2; 75 → 6; 80 → 7; 90 → 9; clamp(120+) → 15.
+// ---------------------------------------------------------------------------
+
+describe("calculateRisk — Contextual Speed (continuous exposure)", () => {
+  const low = { weatherRisk: 0, zoneRisk: 0, hosHours: 4, safetyEvents: [] as { type: string; severity: number }[] };
+
+  test("1. zero speed produces zero exposure", () => {
+    const result = calculateRisk({ ...low, speed: 0 });
+    assert.equal(result.contextualSpeed.speedExposure, 0);
+    assert.equal(result.contextualSpeed.active, false);
+    assert.equal(result.score, 100);
+  });
+
+  test("2. negative speed is handled safely (floors to 0 exposure, not a crash or fabricated penalty)", () => {
+    const result = calculateRisk({ ...low, speed: -10 });
+    assert.equal(result.contextualSpeed.speedExposure, 0);
+    assert.equal(result.contextualSpeed.finalPenalty, 0);
+    assert.equal(result.score, 100);
+  });
+
+  test("3. exposure increases monotonically with speed across the plausible domain [0, MAX_PLAUSIBLE_SPEED_MPH]", () => {
+    // 150mph is deliberately excluded — beyond the plausible domain it's
+    // "invalid telemetry, reject to 0" (see the plausibility boundary
+    // describe block below), not part of the monotonic curve.
+    const speeds = [0, 15, 20, 35, 45, 55, 65, 75, 90, 120];
+    const exposures = speeds.map((speed) => calculateRisk({ ...low, speed }).contextualSpeed.speedExposure);
+    for (let i = 1; i < exposures.length; i++) {
+      assert.ok(exposures[i] >= exposures[i - 1], `exposure at ${speeds[i]}mph (${exposures[i]}) should be >= at ${speeds[i - 1]}mph (${exposures[i - 1]})`);
+    }
+  });
+
+  test("4. no discontinuity at the old 70 mph cliff", () => {
+    const at69 = calculateRisk({ ...low, speed: 69 }).contextualSpeed.speedExposure;
+    const at70 = calculateRisk({ ...low, speed: 70 }).contextualSpeed.speedExposure;
+    const at71 = calculateRisk({ ...low, speed: 71 }).contextualSpeed.speedExposure;
+    // A 1mph step anywhere on the curve moves exposure by at most one segment's slope (0.2/mph, the steepest segment) — nowhere near the old cliff's full 10.5-point jump from 69->71.
+    assert.ok(Math.abs(at70 - at69) <= 0.2 + 1e-9);
+    assert.ok(Math.abs(at71 - at70) <= 0.2 + 1e-9);
+  });
+
+  test("5. 69, 70, and 71 mph produce nearby progressive values", () => {
+    assert.equal(calculateRisk({ ...low, speed: 69 }).contextualSpeed.speedExposure, 4.8);
+    assert.equal(calculateRisk({ ...low, speed: 70 }).contextualSpeed.speedExposure, 5.0);
+    assert.equal(calculateRisk({ ...low, speed: 71 }).contextualSpeed.speedExposure, 5.2);
+  });
+
+  test("6. moderate speed with low context produces a modest penalty (65mph, no amplification)", () => {
+    const result = calculateRisk({ ...low, speed: 65 });
+    assert.equal(result.contextualSpeed.speedExposure, 4);
+    assert.equal(result.contextualSpeed.multiplier, 1);
+    assert.equal(result.contextualSpeed.finalPenalty, 4);
+    assert.equal(result.score, 96); // modest — not a large chunk of the 100-point budget
+  });
+
+  test("7. moderate speed with severe weather produces a larger penalty", () => {
+    const result = calculateRisk({ ...low, speed: 65, weatherRisk: 1 });
+    assert.equal(result.contextualSpeed.multiplier, 1.5);
+    assert.equal(result.contextualSpeed.finalPenalty, 6);
+    assert.ok(result.contextualSpeed.finalPenalty > 4);
+  });
+
+  test("8. moderate speed with high zone risk produces a larger penalty", () => {
+    const result = calculateRisk({ ...low, speed: 65, zoneRisk: 1 });
+    assert.equal(result.contextualSpeed.multiplier, 1.4);
+    assert.equal(result.contextualSpeed.finalPenalty, 5.6);
+  });
+
+  test("9. moderate speed with fatigue produces a larger penalty", () => {
+    const result = calculateRisk({ ...low, speed: 65, hosHours: 14 });
+    assert.equal(result.contextualSpeed.multiplier, 1.3);
+    assert.equal(result.contextualSpeed.finalPenalty, 5.2);
+  });
+
+  test("10. recent distraction amplifies speed exposure", () => {
+    const result = calculateRisk({ ...low, speed: 65, safetyEvents: [{ type: "mobile_usage", severity: 5 }] });
+    assert.equal(result.contextualSpeed.multiplier, 1.1);
+    assert.ok(Math.abs(result.contextualSpeed.finalPenalty - 4.4) < 1e-9);
+  });
+
+  test("11. unavailable context does not amplify the speed exposure, even with a misleading nonzero value underneath", () => {
+    const result = calculateRisk({
+      ...low, speed: 90, weatherRisk: 0.95, zoneRisk: 0.95,
+      weatherAvailable: false, zoneRiskAvailable: false,
+    });
+    assert.equal(result.contextualSpeed.multiplier, 1);
+    assert.equal(result.contextualSpeed.finalPenalty, result.contextualSpeed.speedExposure);
+    assert.equal(result.contextualSpeed.contextComplete, false);
+    assert.deepEqual(result.contextualSpeed.missingContext, ["Weather", "Zone risk"]);
+  });
+
+  test("12. unavailable speed (defaulted to 0 upstream) produces no contextual speed penalty", () => {
+    const result = calculateRisk({ ...low, speed: 0, weatherRisk: 0.9, zoneRisk: 0.9, hosHours: 14 });
+    assert.equal(result.contextualSpeed.active, false);
+    assert.equal(result.contextualSpeed.finalPenalty, 0);
+  });
+
+  test("13. extreme malformed speed is REJECTED, not clamped to max exposure — a driver is never penalized for corrupted telemetry", () => {
+    const extreme = calculateRisk({ ...low, speed: 99999 }).contextualSpeed;
+    assert.equal(extreme.speedExposure, 0);
+    assert.equal(extreme.finalPenalty, 0);
+    assert.equal(extreme.active, false);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Plausibility boundary: MAX_PLAUSIBLE_SPEED_MPH (120) separates "a valid,
+  // extreme speed" from "invalid/implausible telemetry." Values at or below
+  // the boundary are scored normally; anything above, non-finite, or
+  // negative is rejected outright (0 exposure), never clamped into range.
+  // ---------------------------------------------------------------------------
+  describe("speed plausibility boundary (MAX_PLAUSIBLE_SPEED_MPH)", () => {
+    test("1. 120 mph (the plausible maximum) produces the maximum bounded exposure", () => {
+      const result = calculateRisk({ ...low, speed: 120 });
+      assert.equal(result.contextualSpeed.speedExposure, 15);
+      assert.equal(result.contextualSpeed.active, true);
+    });
+
+    test("2. a value above the plausible maximum (121 mph) produces zero exposure", () => {
+      const result = calculateRisk({ ...low, speed: 121 });
+      assert.equal(result.contextualSpeed.speedExposure, 0);
+      assert.equal(result.contextualSpeed.active, false);
+    });
+
+    test("3. 99999 mph produces zero exposure", () => {
+      const result = calculateRisk({ ...low, speed: 99999 });
+      assert.equal(result.contextualSpeed.speedExposure, 0);
+    });
+
+    test("4. NaN produces zero exposure", () => {
+      const result = calculateRisk({ ...low, speed: NaN });
+      assert.equal(result.contextualSpeed.speedExposure, 0);
+      assert.equal(Number.isFinite(result.score), true);
+    });
+
+    test("5. positive infinity produces zero exposure", () => {
+      const result = calculateRisk({ ...low, speed: Infinity });
+      assert.equal(result.contextualSpeed.speedExposure, 0);
+      assert.equal(Number.isFinite(result.score), true);
+    });
+
+    test("5b. negative infinity produces zero exposure", () => {
+      const result = calculateRisk({ ...low, speed: -Infinity });
+      assert.equal(result.contextualSpeed.speedExposure, 0);
+      assert.equal(Number.isFinite(result.score), true);
+    });
+
+    test("6. negative speed produces zero exposure", () => {
+      const result = calculateRisk({ ...low, speed: -10 });
+      assert.equal(result.contextualSpeed.speedExposure, 0);
+    });
+
+    test("7. invalid speed does not activate the Contextual Speed card", () => {
+      for (const speed of [NaN, Infinity, -5, 99999, 121]) {
+        assert.equal(calculateRisk({ ...low, speed }).contextualSpeed.active, false, `speed=${speed} should not activate Contextual Speed`);
+      }
+    });
+
+    test("8. invalid speed cannot be amplified by weather, zone, fatigue, or behavior", () => {
+      const result = calculateRisk({
+        weatherRisk: 1, zoneRisk: 1, hosHours: 14,
+        safetyEvents: [{ type: "harsh_braking", severity: 5 }],
+        speed: 99999,
+      });
+      // The multiplier is still computed (weather/zone/fatigue/behavior are
+      // independent of speed), but with 0 exposure to multiply, the final
+      // contextual speed penalty is 0 regardless of how large the multiplier is.
+      assert.ok(result.contextualSpeed.multiplier > 1);
+      assert.equal(result.contextualSpeed.speedExposure, 0);
+      assert.equal(result.contextualSpeed.finalPenalty, 0);
+      assert.equal(result.contextualSpeed.active, false);
+    });
+
+    test("9. valid speed behavior is unchanged (65mph, 90mph still score as before)", () => {
+      assert.equal(calculateRisk({ ...low, speed: 65 }).contextualSpeed.speedExposure, 4);
+      assert.equal(calculateRisk({ ...low, speed: 90 }).contextualSpeed.speedExposure, 9);
+    });
+  });
+
+  test("14. multiplier cap is still enforced after the exposure formula change", () => {
+    const result = calculateRisk({
+      safetyEvents: [
+        { type: "mobile_usage", severity: 5 },
+        { type: "inattentive_driving", severity: 5 },
+        { type: "harsh_braking", severity: 5 },
+      ],
+      hosHours: 100, weatherRisk: 10, zoneRisk: 10, speed: 90, // weatherRisk/zoneRisk outside the documented 0–1 domain
+    });
+    assert.equal(result.contextualSpeed.multiplier, 2.5); // MULTIPLIER_CAP, unchanged
+    assert.equal(result.contextualSpeed.finalPenalty, result.contextualSpeed.speedExposure * 2.5);
+  });
+
+  test("15. final score remains clamped between 0 and 100 under an extreme combined scenario", () => {
+    const result = calculateRisk({
+      safetyEvents: [
+        { type: "speeding", severity: 5 },
+        { type: "speeding", severity: 5 },
+        { type: "harsh_braking", severity: 5 },
+        { type: "mobile_usage", severity: 5 },
+        { type: "high_speed_power_loss", severity: 5 },
+      ],
+      hosHours: 20, weatherRisk: 1, zoneRisk: 1, speed: 150, // beyond the clamp
+    });
+    assert.ok(result.score >= 0 && result.score <= 100);
+  });
+
+  test("16. existing speeding-event penalties continue working, independent of continuous exposure", () => {
+    const result = calculateRisk({ ...low, speed: 0, safetyEvents: [{ type: "speeding", severity: 4 }] });
+    assert.equal(result.contextualSpeed.active, false); // no continuous exposure at 0mph
+    assert.ok(result.factors.some((f) => f.name === "Speeding")); // but the standalone event penalty still fires
+    assert.ok(result.score < 100);
+  });
+
+  test("17. no unintended double-counting: a standalone speeding event does not amplify continuous speed exposure", () => {
+    const withoutEvent = calculateRisk({ ...low, speed: 65 }).contextualSpeed;
+    const withSpeedingEvent = calculateRisk({ ...low, speed: 65, safetyEvents: [{ type: "speeding", severity: 5 }] }).contextualSpeed;
+    assert.equal(withSpeedingEvent.multiplier, withoutEvent.multiplier); // "speeding" is excluded from the behavior modifier
+    const behaviorComponent = withSpeedingEvent.components.find((c) => c.key === "behavior")!;
+    assert.equal(behaviorComponent.modifier, 0);
+
+    // harsh_braking, by contrast, IS eligible to amplify (behaviorally independent of current speed).
+    const withHarshBraking = calculateRisk({ ...low, speed: 65, safetyEvents: [{ type: "harsh_braking", severity: 5 }] }).contextualSpeed;
+    assert.ok(withHarshBraking.multiplier > withoutEvent.multiplier);
+  });
+
+  test("18. explainability components sum consistently with the final contextual penalty", () => {
+    const result = calculateRisk({
+      safetyEvents: [{ type: "harsh_turn", severity: 2 }],
+      hosHours: 11, weatherRisk: 0.6, zoneRisk: 0.4, speed: 95,
+    });
+    const { speedExposure, multiplier, finalPenalty, components } = result.contextualSpeed;
+    const impliedMultiplier = Math.min(1 + components.reduce((sum, c) => sum + c.modifier, 0), 2.5);
+    assert.ok(Math.abs(multiplier - impliedMultiplier) < 1e-9);
+    assert.ok(Math.abs(finalPenalty - speedExposure * multiplier) < 1e-9);
+  });
+
+  test("19. existing non-speed risk calculations remain stable", () => {
+    const result = calculateRisk({
+      safetyEvents: [{ type: "harsh_braking", severity: 3 }],
+      hosHours: null, weatherRisk: 0, zoneRisk: 0, speed: 0,
+    });
+    assert.equal(result.contextualSpeed.active, false);
+    assert.ok(result.factors.some((f) => f.name === "Harsh Braking"));
+    assert.ok(!result.factors.some((f) => f.name === "Fatigue"));
+  });
+
+  test("missingContext never includes 'behavior' (always structurally available, no *Available flag needed)", () => {
+    const result = calculateRisk({
+      ...low, speed: 90, weatherAvailable: false, zoneRiskAvailable: false, hosAvailable: false,
+    });
+    assert.deepEqual(result.contextualSpeed.missingContext, ["Weather", "Zone risk", "HOS"]);
+    const behaviorComponent = result.contextualSpeed.components.find((c) => c.key === "behavior")!;
+    assert.equal(behaviorComponent.included, true);
   });
 });

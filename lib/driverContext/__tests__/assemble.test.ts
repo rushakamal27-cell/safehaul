@@ -694,4 +694,44 @@ describe("assembleSpeed", () => {
     assert.equal(field.provider, "internal");
     assert.equal(field.value, scenario.currentSpeed);
   });
+
+  // Speed plausibility (defense layer 1 of 2 — see MAX_PLAUSIBLE_SPEED_MPH /
+  // isPlausibleSpeed in lib/riskEngine.ts for layer 2, inside the engine
+  // itself). A fresh GPS reading with an implausible speedMilesPerHour is
+  // corrupted telemetry, not a real fast truck — it must be marked
+  // unavailable here so contextSources.speed never reports `observed`/
+  // `fresh` next to a bogus number.
+  describe("implausible speedMilesPerHour is rejected as unavailable, never observed", () => {
+    test("negative speedMilesPerHour: unavailable, not fabricated as a real reading", () => {
+      const { field } = assembleSpeed("drv_1", true, NOW_ISO, freshLocation({ speedMilesPerHour: -5 }));
+      assert.equal(field.value, null);
+      assert.equal(field.origin, null);
+      assert.equal(field.state, "unavailable");
+    });
+
+    test("speedMilesPerHour above MAX_PLAUSIBLE_SPEED_MPH (e.g. 99999): unavailable, never scored as an extremely fast truck", () => {
+      const { field } = assembleSpeed("drv_1", true, NOW_ISO, freshLocation({ speedMilesPerHour: 99999 }));
+      assert.equal(field.value, null);
+      assert.equal(field.state, "unavailable");
+    });
+
+    test("speedMilesPerHour exactly at MAX_PLAUSIBLE_SPEED_MPH (120): still observed, this is the valid boundary", () => {
+      const { field } = assembleSpeed("drv_1", true, NOW_ISO, freshLocation({ speedMilesPerHour: 120 }));
+      assert.equal(field.value, 120);
+      assert.equal(field.origin, "observed");
+      assert.equal(field.state, "fresh");
+    });
+
+    test("speedMilesPerHour just above the boundary (121): unavailable — no silently invented tolerance", () => {
+      const { field } = assembleSpeed("drv_1", true, NOW_ISO, freshLocation({ speedMilesPerHour: 121 }));
+      assert.equal(field.value, null);
+      assert.equal(field.state, "unavailable");
+    });
+
+    test("NaN speedMilesPerHour: unavailable, not a crash", () => {
+      const { field } = assembleSpeed("drv_1", true, NOW_ISO, freshLocation({ speedMilesPerHour: NaN }));
+      assert.equal(field.value, null);
+      assert.equal(field.state, "unavailable");
+    });
+  });
 });

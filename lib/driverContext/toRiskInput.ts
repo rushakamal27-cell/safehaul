@@ -15,6 +15,15 @@
  * calculateRisk() never imports lib/driverContext — this function is the
  * only seam allowed to see both types, so DriverContextField metadata can't
  * leak into the risk engine.
+ *
+ * weatherAvailable/zoneRiskAvailable/hosAvailable (Phase 4.5 — Contextual
+ * Speed) are the one exception to "never leak DriverContextField metadata":
+ * they carry only a plain boolean (not origin/state/provider/observedAt) so
+ * the contextual speed multiplier in lib/riskEngine.ts can tell "real data
+ * defaulted to a neutral 0/null" apart from "a genuine 0/null reading" —
+ * without amplifying a pilot's speed penalty on a data gap it can't see.
+ * Equivalent to `value !== null` on the corresponding field — the same test
+ * hosHours already relies on above, just also applied to weather/zoneRisk.
  */
 
 import type { RiskInput } from "@/lib/riskEngine";
@@ -27,5 +36,8 @@ export function toRiskInput(context: DriverContext): RiskInput {
     weatherRisk: context.weather.value ?? 0,
     zoneRisk: context.zoneRisk.value ?? 0,
     speed: context.speed.value ?? 0,
+    weatherAvailable: context.weather.value !== null,
+    zoneRiskAvailable: context.zoneRisk.value !== null,
+    hosAvailable: context.hos.value !== null,
   };
 }

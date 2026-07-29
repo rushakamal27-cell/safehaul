@@ -156,6 +156,19 @@ function buildPartialLiveDisclosure(sources: ContextSources): string {
     .join(" ");
 }
 
+/** "A, B and C" — small local join, same shape as the joinWithAnd() helper Phase 5 removed elsewhere, kept minimal since missingContext never exceeds 3 items (weather/zone/HOS). */
+function joinList(items: string[]): string {
+  if (items.length <= 1) return items.join("");
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+/** +40% / -10% / +0% — signed whole-percent display for a contextual speed modifier. */
+function formatModifierPercent(modifier: number): string {
+  const pct = Math.round(modifier * 100);
+  return `${pct >= 0 ? "+" : ""}${pct}%`;
+}
+
 function formatEventType(type: string): string {
   return type.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 }
@@ -481,6 +494,53 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
               <div style={{ fontSize: 13, fontWeight: 500, color: "var(--text-primary)" }}>{value}</div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Contextual Speed breakdown (Phase 4.5, continuous-exposure refinement)
+          — only when there's an actual speed exposure to explain (a
+          continuous, no-cliff signal — see calculateSpeedExposure in
+          lib/riskEngine.ts; this is no longer "only above 70 mph").
+          Modifiers for unavailable inputs are never shown (see `included`
+          on each component), and missing context is disclosed in plain
+          driver-facing language rather than field names like
+          "hosAvailable". */}
+      {result && result.contextualSpeed.active && (
+        <div
+          style={{
+            background: "var(--card)",
+            border: "1px solid var(--border)",
+            borderRadius: 16,
+            padding: "16px 18px",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 12 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", letterSpacing: "0.2px" }}>
+              Contextual Speed
+            </span>
+            <span style={{ fontSize: 15, fontWeight: 700, color: "var(--text-primary)", fontVariantNumeric: "tabular-nums" }}>
+              {result.contextualSpeed.finalPenalty.toFixed(1)} pts
+            </span>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5 }}>
+              <span style={{ color: "var(--text-secondary)" }}>Speed exposure</span>
+              <span style={{ color: "var(--text-primary)", fontVariantNumeric: "tabular-nums" }}>{result.contextualSpeed.speedExposure.toFixed(1)}</span>
+            </div>
+            {result.contextualSpeed.components
+              .filter((c) => c.included && c.modifier > 0)
+              .map((c) => (
+                <div key={c.key} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5 }}>
+                  <span style={{ color: "var(--text-secondary)" }}>{c.label} amplification</span>
+                  <span style={{ color: "var(--text-primary)", fontVariantNumeric: "tabular-nums" }}>{formatModifierPercent(c.modifier)}</span>
+                </div>
+              ))}
+          </div>
+          {!result.contextualSpeed.contextComplete && (
+            <div style={{ fontSize: 11.5, color: "var(--text-tertiary)", marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+              Context incomplete: {joinList(result.contextualSpeed.missingContext)} data unavailable.
+            </div>
+          )}
         </div>
       )}
 
