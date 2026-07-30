@@ -41,6 +41,7 @@ model Driver {
   inspections      Inspection[]
   providerMappings DriverProviderMapping[]
   driverEvents     DriverEvent[]
+  legalAcceptances LegalAcceptance[]
 }
 
 model Trip {
@@ -246,4 +247,59 @@ model DriverEvent {
   @@index([driverId, timestamp])
   @@index([type])
   @@index([provider])
+}
+
+// ---------------------------------------------------------------------------
+// Legal onboarding layer (Phase 4.6B)
+// ---------------------------------------------------------------------------
+
+/// One row per published legal document version (Terms of Use, Privacy
+/// Notice, future document types). A revision is always a NEW row — content
+/// is immutable once published, never edited in place.
+///
+/// "Only one active version per type" is enforced in application code
+/// (lib/legal.ts::activateLegalDocument), not a DB constraint — Prisma's
+/// schema language has no partial-unique-index support without a raw
+/// migration, and this project currently applies schema via `db push`
+/// (see CLAUDE.md). Documented here as a known future-hardening item.
+model LegalDocument {
+  id          String            @id @default(cuid())
+  type        String // "terms_of_use" | "privacy_notice" | future types — see lib/legal.ts LegalDocumentType
+  version     Int // 1, 2, 3... monotonically increasing per type
+  title       String
+  content     String // placeholder copy for now — see prisma/seed.ts
+  contentHash String // sha256 of `content`, for integrity/tamper-evidence
+  publishedAt DateTime          @default(now())
+  effectiveAt DateTime // when this version becomes the one drivers must accept
+  isActive    Boolean           @default(false)
+  createdAt   DateTime          @default(now())
+  acceptances LegalAcceptance[]
+
+  @@unique([type, version])
+  @@index([type])
+  @@index([type, isActive])
+}
+
+/// One row per (driver, document version) acceptance event. A driver accepts
+/// each version at most once (unique constraint) but accumulates a new row
+/// per version over time as revisions are published — this history is what
+/// makes future versions "automatically" require re-acceptance with no code
+/// changes: the status check just compares active document IDs against
+/// accepted document IDs (see lib/legal.ts::getLegalStatus).
+model LegalAcceptance {
+  id              String        @id @default(cuid())
+  driverId        String
+  driver          Driver        @relation(fields: [driverId], references: [id])
+  legalDocumentId String
+  legalDocument   LegalDocument @relation(fields: [legalDocumentId], references: [id])
+  /// Snapshot of the Telegram user ID at acceptance time — evidentiary, kept
+  /// even if the Driver record's identity fields change later.
+  telegramUserId  String
+  acceptedAt      DateTime      @default(now())
+  userAgent       String? // best-effort, from the request's User-Agent header
+  ipAddress       String? // best-effort, from X-Forwarded-For; never client-supplied
+
+  @@unique([driverId, legalDocumentId])
+  @@index([driverId])
+  @@index([legalDocumentId])
 }

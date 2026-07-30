@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { TopBar } from "@/components/layout/TopBar";
 import { BottomNav } from "@/components/layout/BottomNav";
 import { Toast } from "@/components/ui/Toast";
@@ -9,6 +9,9 @@ import { InspectScreen } from "@/components/screens/InspectScreen";
 import { AuditScreen } from "@/components/screens/AuditScreen";
 import { DrivingOverlay } from "@/components/screens/DrivingOverlay";
 import { SettingsScreen } from "@/components/screens/SettingsScreen";
+import { LegalGateScreen } from "@/components/screens/LegalGateScreen";
+import { useTelegram } from "@/lib/useTelegram";
+import type { LegalDocumentSummary } from "@/lib/legal";
 
 type Tab = "dash" | "inspect" | "audit" | "settings";
 
@@ -16,6 +19,60 @@ export default function Home() {
   const [activeTab, setActiveTab]   = useState<Tab>("dash");
   const [isDriving, setIsDriving]   = useState(false);
   const [toast, setToast]           = useState({ msg: "", visible: false });
+
+  const telegramUser = useTelegram();
+  const [driverId,   setDriverId]   = useState<string | null>(null);
+  const [legalGate,  setLegalGate]  = useState<"checking" | "required" | "clear">("checking");
+  const [pendingDocs, setPendingDocs] = useState<LegalDocumentSummary[]>([]);
+
+  // ── Resolve driver + legal-acceptance gate (Phase 4.6B) ──────────────────
+  // Runs once telegramUser is available; each screen still resolves its own
+  // driverId independently as before — this is only for the gate itself.
+  const checkLegalStatus = useCallback(async (id: string) => {
+    const statusRes = await fetch(`/api/legal/status?driverId=${id}`);
+    if (!statusRes.ok) throw new Error(`Legal status API failed: ${statusRes.status}`);
+    const status = await statusRes.json();
+    if (status.onboardingComplete) {
+      setLegalGate("clear");
+      setPendingDocs([]);
+    } else {
+      setPendingDocs(status.pending);
+      setLegalGate("required");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!telegramUser) return;
+    let cancelled = false;
+
+    async function resolveAndCheck() {
+      try {
+        const driverRes = await fetch("/api/driver", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            telegramUserId: telegramUser!.id,
+            name: telegramUser!.firstName,
+            lastName: telegramUser!.lastName,
+            username: telegramUser!.username,
+          }),
+        });
+        if (!driverRes.ok) throw new Error(`Driver API failed: ${driverRes.status}`);
+        const { driver } = await driverRes.json();
+        if (cancelled) return;
+        setDriverId(driver.id);
+        await checkLegalStatus(driver.id);
+      } catch (err) {
+        console.error("[page] Failed to resolve driver/legal status:", err);
+        // Fail open rather than permanently locking a driver out on a transient
+        // network error — the gate simply re-checks on next load.
+        if (!cancelled) setLegalGate("clear");
+      }
+    }
+
+    resolveAndCheck();
+    return () => { cancelled = true; };
+  }, [telegramUser, checkLegalStatus]);
 
   const showToast = useCallback((msg: string) => {
     setToast({ msg, visible: true });
@@ -29,6 +86,26 @@ export default function Home() {
     setIsDriving(next);
     showToast(next ? "Driving mode activated" : "Driving mode off");
   };
+
+  // ── Legal gate takes over the whole screen until accepted ────────────────
+  // Blocks on "checking" too — the dashboard must never flash before we know
+  // whether this driver still needs to accept something.
+  if (legalGate === "checking" || legalGate === "required") {
+    return (
+      <div
+        className="max-w-[420px] min-h-screen mx-auto relative overflow-hidden"
+        style={{ background: "var(--bg)" }}
+      >
+        {legalGate === "required" && driverId && (
+          <LegalGateScreen
+            driverId={driverId}
+            pending={pendingDocs}
+            onAccepted={() => setLegalGate("clear")}
+          />
+        )}
+      </div>
+    );
+  }
 
   return (
     <div
