@@ -1,6 +1,8 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { useTelegram } from "@/lib/useTelegram";
+import { resolveDisplayName } from "@/lib/driverIdentity";
 import {
   User, Bell, SlidersHorizontal, Bluetooth, Shield,
   Info, ChevronRight, LogOut,
@@ -122,6 +124,37 @@ interface SettingsScreenProps {
 
 export function SettingsScreen({ onLogout }: SettingsScreenProps) {
   const telegramUser = useTelegram();
+  const [canonicalName, setCanonicalName] = useState<string | null>(null);
+
+  // Resolve the driver record once to pick up canonicalName (real operational
+  // identity) for display — see lib/driverIdentity.ts. Read-only: this screen
+  // doesn't need driverId, so it doesn't send lastName/username on this call.
+  useEffect(() => {
+    if (!telegramUser) return;
+    let cancelled = false;
+
+    fetch("/api/driver", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ telegramUserId: telegramUser.id, name: telegramUser.firstName }),
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && data?.driver) setCanonicalName(data.driver.canonicalName ?? null);
+      })
+      .catch(() => {
+        // Non-fatal — falls back to Telegram-derived display name below.
+      });
+
+    return () => { cancelled = true; };
+  }, [telegramUser]);
+
+  const displayName = resolveDisplayName({
+    canonicalName,
+    telegramFirstName: telegramUser?.firstName,
+    telegramLastName:  telegramUser?.lastName,
+    telegramUsername:  telegramUser?.username,
+  });
 
   const iconSize = { size: 16, strokeWidth: 1.75 } as const;
 
@@ -162,14 +195,13 @@ export function SettingsScreen({ onLogout }: SettingsScreenProps) {
               fontSize: 20,
             }}
           >
-            {telegramUser?.firstName?.charAt(0)?.toUpperCase() ?? "D"}
+            {displayName.replace(/^@/, "").charAt(0).toUpperCase()}
           </div>
 
           {/* Name + role */}
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 16, fontWeight: 600, color: "var(--text-primary)" }}>
-              {telegramUser?.firstName ? telegramUser.firstName : "Driver"}
-              {telegramUser?.username ? ` @${telegramUser.username}` : ""}
+              {displayName}
             </div>
             <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 2 }}>
               Professional Driver · SafeHaul

@@ -96,6 +96,7 @@ export function normalizeSafetyStreamEvent(
     // --- Optional fields ---
     // Samsara stream uses "asset" (not "vehicle") for the vehicle/asset object.
     const externalVehicleId = event.asset?.id;
+    const driverName = event.driver?.name;
 
     // Severity: Samsara stream uses "low" | "medium" | "high" | "critical".
     // normalizeSeverity handles these string values via SEVERITY_STRING_MAP.
@@ -121,6 +122,7 @@ export function normalizeSafetyStreamEvent(
 
     const normalized: NormalizedProviderEvent = {
       externalDriverId,
+      ...(driverName         ? { driverName }         : {}),
       ...(externalVehicleId ? { externalVehicleId } : {}),
       // event.id is required by Samsara schema — always present, always used for dedup
       externalEventId: event.id,

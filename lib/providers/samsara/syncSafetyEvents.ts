@@ -113,6 +113,7 @@ import {
   normalizeSafetyStreamEvent,
   type StreamSkipReason,
 } from "@/lib/providers/samsara/normalizeStreamEvent";
+import { syncProviderDriverName } from "@/lib/driverIdentity";
 
 export const PROVIDER = "samsara" as const;
 export const STREAM_KEY = "safety-events" as const;
@@ -342,6 +343,24 @@ async function processPage(page: SamsaraSafetyStreamResponse, stats: SamsaraSync
           `[sync/samsara] No mapping for externalDriverId="${normalized.event.externalDriverId}" — skipping`
         );
         continue;
+      }
+
+      // Sync provider-reported driver name onto the mapping + Driver.canonicalName.
+      // Independent of pilot/active status below — identity metadata, not event data.
+      // Never allowed to break DriverEvent creation.
+      if (normalized.event.driverName) {
+        try {
+          await syncProviderDriverName(
+            PROVIDER,
+            normalized.event.externalDriverId,
+            normalized.event.driverName
+          );
+        } catch (err) {
+          console.error(
+            `[sync/samsara] Failed to sync driver name for externalDriverId="${normalized.event.externalDriverId}":`,
+            err
+          );
+        }
       }
 
       if (!mapping.isActive || !mapping.isPilot) {

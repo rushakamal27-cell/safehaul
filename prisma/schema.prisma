@@ -20,8 +20,17 @@ model Company {
 model Driver {
   id               String                  @id @default(cuid())
   telegramUserId   String                  @unique
-  samsaraDriverId  String?
+  /// Telegram first name at last /api/driver call. Legacy field name; this is
+  /// authentication-identity, not the operational identity — see canonicalName.
   name             String
+  telegramLastName String?
+  telegramUsername String?
+  samsaraDriverId  String?
+  /// Operational identity for reports/dashboards/analytics. Nullable until a
+  /// provider mapping with a known name exists. Auto-synced from the active
+  /// provider mapping's providerDriverName (see lib/driverIdentity.ts) —
+  /// no manual override exists yet.
+  canonicalName    String?
   companyId        String
   company          Company                 @relation(fields: [companyId], references: [id])
   createdAt        DateTime                @default(now())
@@ -138,6 +147,9 @@ model DriverProviderMapping {
   providerAccount   ProviderAccount? @relation(fields: [providerAccountId], references: [id])
   provider          String // "samsara" | "geotab" | etc. (denormalized)
   externalDriverId  String // driver ID in the external system
+  /// Raw driver name as last reported by the provider (e.g. Samsara driver.name
+  /// on an inbound event). Drives Driver.canonicalName — see lib/driverIdentity.ts.
+  providerDriverName String?
   externalVehicleId String? // vehicle / asset ID in the external system
   isPilot           Boolean          @default(false)
   isActive          Boolean          @default(true)

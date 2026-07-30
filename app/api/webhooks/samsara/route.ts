@@ -42,6 +42,7 @@ import {
   type SamsaraWebhookEnvelope,
 } from "@/lib/providers/samsara/types";
 import { normalizeSamsaraEvent } from "@/lib/providers/samsara/normalizeEvent";
+import { syncProviderDriverName } from "@/lib/driverIdentity";
 import { prisma } from "@/lib/prisma";
 
 const PROVIDER = "samsara" as const;
@@ -219,6 +220,20 @@ export async function POST(request: NextRequest) {
       }
 
       driversMatched++;
+
+      // 7a-2. Sync provider-reported driver name onto the mapping + Driver.canonicalName.
+      // Independent of pilot/active status below — identity metadata, not event data.
+      // Never allowed to break DriverEvent creation.
+      if (event.driverName) {
+        try {
+          await syncProviderDriverName(PROVIDER, event.externalDriverId, event.driverName);
+        } catch (err) {
+          console.error(
+            `[webhook/samsara] Failed to sync driver name for externalDriverId="${event.externalDriverId}":`,
+            err
+          );
+        }
+      }
 
       // 7b. Skip inactive mappings
       if (!mapping.isActive) {

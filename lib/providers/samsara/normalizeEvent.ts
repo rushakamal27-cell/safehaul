@@ -35,6 +35,9 @@ export type DriverEventType =
 /** Provider-neutral normalized event ready for DriverEvent persistence. */
 export interface NormalizedProviderEvent {
   externalDriverId:  string;
+  /** Raw driver display name as reported by the provider, when present. Feeds
+   *  Driver.canonicalName sync — see lib/driverIdentity.ts. */
+  driverName?:       string;
   externalVehicleId?: string;
   externalEventId?:  string;   // provider's own dedup ID
   type:              DriverEventType;
@@ -223,6 +226,7 @@ export function normalizeSamsaraEvent(
 
     // --- Optional fields ---
     const externalVehicleId = payload.data?.vehicle?.id;
+    const driverName = payload.data?.driver?.name;
 
     // TODO: Confirm the field name for Samsara's event dedup ID.
     //       May be payload.eventId, payload.data?.id, or absent entirely.
@@ -241,6 +245,7 @@ export function normalizeSamsaraEvent(
 
     const normalized: NormalizedProviderEvent = {
       externalDriverId,
+      ...(driverName         ? { driverName }         : {}),
       ...(externalVehicleId ? { externalVehicleId } : {}),
       ...(externalEventId   ? { externalEventId }   : {}),
       type: internalType,

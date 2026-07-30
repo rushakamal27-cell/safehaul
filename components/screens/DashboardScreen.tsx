@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { RiskInput, RiskOutput } from "@/lib/riskEngine";
 import type { ContextSources, ContextStatus, HosDetail } from "@/lib/driverContext/types";
 import { useTelegram } from "@/lib/useTelegram";
+import { resolveDisplayName } from "@/lib/driverIdentity";
 import type { DriverLocation } from "@/lib/location";
 import {
   Cloud, Moon, Gauge, MapPin, Smartphone, AlertTriangle,
@@ -240,6 +241,7 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
   const [loading,          setLoading]          = useState(true);
   const [error,            setError]            = useState<string | null>(null);
   const [driverId,         setDriverId]         = useState<string | null>(null);
+  const [canonicalName,    setCanonicalName]    = useState<string | null>(null);
   const [showIncidentForm, setShowIncidentForm] = useState(false);
   const [incidentText,     setIncidentText]     = useState("");
   const [submitting,       setSubmitting]       = useState(false);
@@ -257,11 +259,16 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
           body: JSON.stringify({
             telegramUserId: telegramUser!.id,
             name: telegramUser!.firstName,
+            lastName: telegramUser!.lastName,
+            username: telegramUser!.username,
           }),
         });
         if (!driverRes.ok) throw new Error(`Driver API failed: ${driverRes.status}`);
         const { driver } = await driverRes.json();
-        if (!cancelled) setDriverId(driver.id);
+        if (!cancelled) {
+          setDriverId(driver.id);
+          setCanonicalName(driver.canonicalName ?? null);
+        }
 
         const [riskRes, locationRes] = await Promise.all([
           fetch(`/api/risk?driverId=${driver.id}`),
@@ -313,6 +320,17 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
   const levelConfig = result ? (LEVEL_CONFIG[result.level] ?? LEVEL_CONFIG.HIGH) : null;
   const parsedRecs  = result?.recommendations.map(parseRecommendation) ?? [];
 
+  // Preferred order: canonicalName (real operational identity) > Telegram
+  // first+last > Telegram username > generic fallback. See lib/driverIdentity.ts.
+  const displayName = telegramUser
+    ? resolveDisplayName({
+        canonicalName,
+        telegramFirstName: telegramUser.firstName,
+        telegramLastName:  telegramUser.lastName,
+        telegramUsername:  telegramUser.username,
+      })
+    : null;
+
   // ── Render ────────────────────────────────────────────────────────────────────
   return (
     <div className="animate-fade-in flex flex-col" style={{ gap: 24, padding: "24px 20px 8px" }}>
@@ -320,7 +338,7 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
       {/* ── 1. Greeting ─────────────────────────────────────────────────────── */}
       <div>
         <div style={{ fontSize: 24, fontWeight: 600, color: "var(--text-primary)", letterSpacing: "-0.5px", lineHeight: 1.2 }}>
-          {getGreeting()}{telegramUser?.firstName ? `, ${telegramUser.firstName}` : ""}.
+          {getGreeting()}{displayName ? `, ${displayName}` : ""}.
         </div>
         <div style={{ fontSize: 14, color: "var(--text-secondary)", marginTop: 4 }}>
           Drive safely today.

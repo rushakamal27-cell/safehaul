@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 export interface TelegramUser {
   id: string;
   firstName: string;
+  lastName?: string;
   username?: string;
 }
 
@@ -24,6 +25,7 @@ export function useTelegram(): TelegramUser | null {
         setUser({
           id:        String(tgUser.id),
           firstName: tgUser.first_name ?? "",
+          lastName:  tgUser.last_name,
           username:  tgUser.username,
         });
       } else {

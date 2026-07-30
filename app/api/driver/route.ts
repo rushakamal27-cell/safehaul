@@ -4,7 +4,7 @@ import { prisma } from '../../../lib/prisma'
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { telegramUserId, name } = body
+    const { telegramUserId, name, lastName, username } = body
 
     if (!telegramUserId || !name) {
       return NextResponse.json(
@@ -33,8 +33,24 @@ export async function POST(request: NextRequest) {
         data: {
           telegramUserId: String(telegramUserId),
           name,
+          telegramLastName: lastName ?? null,
+          telegramUsername: username ?? null,
           companyId: company.id
         },
+        include: { company: true }
+      })
+    } else {
+      // Keep the Telegram-derived identity fields current on every call — this
+      // is authentication identity (name/lastName/username), never
+      // canonicalName, which is provider-sync-owned (see lib/driverIdentity.ts).
+      // Fields omitted from the request body are left unchanged, not cleared.
+      const updateData: { name: string; telegramLastName?: string | null; telegramUsername?: string | null } = { name }
+      if (lastName !== undefined) updateData.telegramLastName = lastName || null
+      if (username !== undefined) updateData.telegramUsername = username || null
+
+      driver = await prisma.driver.update({
+        where: { id: driver.id },
+        data: updateData,
         include: { company: true }
       })
     }
