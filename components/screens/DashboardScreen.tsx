@@ -74,7 +74,7 @@ const PROVIDER_LABELS: Record<string, string> = {
 const CONTEXT_STATUS_CONFIG: Record<ContextStatus, { color: string; statusLabel: string }> = {
   full_live:    { color: "var(--green)",         statusLabel: "Fully live"     },
   partial_live: { color: "var(--warning)",       statusLabel: "Partially live" },
-  demo:         { color: "var(--text-tertiary)", statusLabel: "Demo Data"      },
+  demo:         { color: "var(--text-tertiary)", statusLabel: "Public Demo"    },
 };
 
 type FieldMeta = ContextSources[keyof ContextSources];
@@ -476,6 +476,10 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
                 {riskData.contextStatus === "partial_live" && (
                   <div style={{ fontSize: 11.5, color: "var(--text-tertiary)", marginTop: 8, lineHeight: 1.4 }}>
                     {buildPartialLiveDisclosure(riskData.contextSources)}
+                    {/* Demo accounts only (dataSource "mock") — appended, never replacing the
+                        per-field technical breakdown above. Real pilot drivers on a partial_live
+                        connection (dataSource "real") see the breakdown exactly as before. */}
+                    {riskData.dataSource === "mock" && " This account uses simulated driving data for demonstration. Connected fleet drivers receive real telematics data."}
                   </div>
                 )}
               </div>
