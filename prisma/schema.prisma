@@ -222,6 +222,28 @@ model ProviderSyncState {
   @@index([provider])
 }
 
+/// TEMPORARY diagnostic table (added 2026-08-04, HOS observability investigation)
+/// — answers "does Samsara's HOS Clocks endpoint ever return an entry for
+/// this pilot driver?" without touching risk scoring or exposing raw
+/// provider payloads anywhere. One throttled row per (driver, ~15min
+/// window) — see lib/providers/samsara/hosObservability.ts. Not read by any
+/// scoring/UI code path; safe to drop once the underlying provider-side
+/// question is answered. Deliberately has no `driver` relation (unlike
+/// DriverEvent) — kept fully decoupled from the core domain model so it can
+/// be removed without touching Driver.
+model HosObservation {
+  id                String    @id @default(cuid())
+  driverId          String // SafeHaul internal driver ID (not a DB relation — see model comment)
+  externalDriverId  String // Samsara driver ID from DriverProviderMapping at request time
+  requestedAt       DateTime  @default(now())
+  clocksReturned    Boolean // true if Samsara's HOS Clocks `data` array was non-empty
+  emptyReason       String? // e.g. "no_active_clock_entries" | "no_provider_mapping" | "fetch_error"
+  providerStatus    Int? // Samsara's HTTP status code, when a request was actually made
+  providerUpdatedAt DateTime? // Samsara's own lastUpdatedAtTime on the clock entry, when present
+
+  @@index([driverId, requestedAt])
+}
+
 /// Provider-neutral normalized driver safety event.
 /// Only created when a verified pilot driver mapping exists.
 /// This is the stable internal representation — never tightly coupled to Samsara fields.

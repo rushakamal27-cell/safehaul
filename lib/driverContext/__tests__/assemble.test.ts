@@ -550,16 +550,22 @@ describe("assembleZoneRisk", () => {
     assert.equal(detail.locationObservedAt, null);
   });
 
-  test("pilot with fresh GPS but no zone match: unavailable, coordinates still reported for transparency, never simulated", async () => {
+  test("pilot with fresh GPS but no zone match: a real 0 reading (outside monitored zones), never 'unavailable' and never simulated", async () => {
     const { field, detail } = await assembleZoneRisk("drv_1", true, NOW_ISO, freshLocation(), {
       matchZone: () => null,
     });
 
-    assert.equal(field.state, "unavailable");
-    assert.equal(field.origin, null);
+    // Fresh, real GPS with no curated-zone hit is a genuine available
+    // reading of "no known elevated zone risk here" — not a data gap. See
+    // the zone-semantics clarification (2026-08-04): only a stale/
+    // unavailable location is a real gap (locationGap in assemble.ts).
+    assert.equal(field.state, "fresh");
+    assert.equal(field.origin, "observed");
     assert.notEqual(field.origin, "simulated");
-    assert.equal(detail.status, "unavailable");
-    assert.equal(detail.zoneRisk, null);
+    assert.equal(field.value, 0);
+    assert.equal(detail.availability, "outside_monitored_zones");
+    assert.equal(detail.status, "available");
+    assert.equal(detail.zoneRisk, 0);
     assert.equal(detail.zoneName, null);
     assert.equal(detail.latitude, 35.078091, "coordinates that WERE attempted are still reported for debugging transparency");
     assert.equal(detail.locationState, "fresh");
@@ -567,8 +573,12 @@ describe("assembleZoneRisk", () => {
   });
 
   test("pilot never falls back to scenario zone data on any path", async () => {
+    // Fresh GPS + no match is a real "observed" 0 reading (outside_monitored_zones),
+    // not null — see the dedicated test above. Only the location-gap paths
+    // below (stale/unavailable GPS) have a null origin. Either way, a pilot's
+    // zoneRisk origin must never be "simulated".
     const freshResult = await assembleZoneRisk("drv_1", true, NOW_ISO, freshLocation(), { matchZone: () => null });
-    assert.equal(freshResult.field.origin, null);
+    assert.equal(freshResult.field.origin, "observed");
     assert.notEqual(freshResult.field.origin, "simulated");
 
     const staleResult = await assembleZoneRisk("drv_1", true, NOW_ISO, staleLocation());

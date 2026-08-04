@@ -185,6 +185,41 @@ export interface WeatherDetail {
 }
 
 /**
+ * Distinguishes *why* zoneRisk has (or lacks) a curated-zone match, so a
+ * valid GPS reading with no monitored-zone coverage is never conflated with
+ * a missing/stale GPS reading — see the "clarify Risk Zone availability
+ * semantics" investigation (2026-08-04).
+ *
+ *   matched                 — fresh real GPS, inside a curated zone's radius.
+ *   outside_monitored_zones — fresh real GPS, but no curated zone contains
+ *                              it. This is a REAL, available reading (a
+ *                              confirmed "no known elevated zone risk here"
+ *                              against SafeHaul's v1 curated dataset — not
+ *                              nationwide coverage), not a data gap. Backs a
+ *                              genuine `zoneRisk` value of 0, never a
+ *                              fabricated penalty.
+ *   location_unavailable    — no usable GPS at all; no lookup could run.
+ *   location_stale          — GPS exists but is too old to trust for "where
+ *                              is the truck right now"; no lookup could run.
+ *
+ * Only `matched` and `outside_monitored_zones` represent an available
+ * zoneRisk value; `location_unavailable`/`location_stale` are genuine gaps.
+ */
+export type ZoneAvailability =
+  | "matched"
+  | "outside_monitored_zones"
+  | "location_unavailable"
+  | "location_stale";
+
+/** Canonical, UI-safe wording for each ZoneAvailability — single source of truth so backend and frontend never drift. */
+export const ZONE_AVAILABILITY_EXPLANATIONS: Record<ZoneAvailability, string> = {
+  matched:                  "Inside a monitored risk zone",
+  outside_monitored_zones:  "Outside monitored risk zones",
+  location_unavailable:     "Location unavailable",
+  location_stale:           "Location data stale",
+};
+
+/**
  * Transparency-only breakdown of a driver's current Zone Risk (Phase 3 —
  * Real Zone Risk) — same relationship to DriverContext.zoneRisk that
  * WeatherDetail has to DriverContext.weather, and gated on location the
@@ -195,9 +230,13 @@ export interface WeatherDetail {
  * is a pure in-process nearest-match against a bundled static dataset, not
  * a live network call — `observedAt` is therefore always the moment the
  * lookup ran (there's no separate upstream "observation time" to preserve,
- * unlike OpenWeatherMap's `dt`). A real GPS position outside every defined
- * zone's radius is a legitimate `status: "unavailable"` result — this is a
- * v1 curated dataset, not nationwide coverage — never a fabricated default.
+ * unlike OpenWeatherMap's `dt`).
+ *
+ * `status` is a coarse available/unavailable summary derived from
+ * `availability` (available = matched | outside_monitored_zones; unavailable
+ * = location_unavailable | location_stale) — kept for existing consumers.
+ * `availability`/`explanation` carry the actual 4-way distinction; prefer
+ * them for anything user-facing.
  *
  * `matchedZoneId`/`distanceMiles` exist purely for auditability: they
  * answer "why did this zone match" without needing to cross-reference the
@@ -206,6 +245,13 @@ export interface WeatherDetail {
 export interface ZoneDetail {
   zoneRisk: number | null;
   zoneName: string | null;
+  /** The matched zone's own hazard category (ZoneType from lib/providers/zones/zoneData.ts) — null unless availability is "matched". */
+  zoneType: string | null;
+  /** The matched zone's own driver-facing explanation (ZoneDefinition.explanation) — null unless availability is "matched". Distinct from `explanation` below, which describes *availability*, not the hazard itself. */
+  zoneExplanation: string | null;
+  availability: ZoneAvailability;
+  /** Ready-to-display wording matching `availability` — see ZONE_AVAILABILITY_EXPLANATIONS. */
+  explanation: string;
   status: "available" | "unavailable";
   origin: "observed" | "simulated" | null;
   provider: "internal_geofence" | null;

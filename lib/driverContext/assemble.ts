@@ -39,12 +39,19 @@
  *     drivers are unchanged: real when OPENWEATHER_API_KEY is set and the
  *     call succeeds for the scenario's coordinates, simulated fallback
  *     otherwise.
- *   - zoneRisk (Phase 3 — Real Zone Risk): for pilots, gated strictly on
- *     location.state === "fresh", same rule and same reasoning as weather
- *     — see assembleZoneRisk below. A fresh position outside every zone in
- *     lib/providers/zones/zoneData.ts also yields "unavailable" (a v1
- *     curated dataset, not nationwide coverage), never a fabricated
- *     default score. Demo drivers are unchanged: scenario zoneRisk/zoneName,
+ *   - zoneRisk (Phase 3 — Real Zone Risk; zone-semantics clarification,
+ *     2026-08-04): for pilots, a lookup only runs when location.state ===
+ *     "fresh", same rule and reasoning as weather — see assembleZoneRisk
+ *     below. Unlike weather, a fresh position outside every zone in
+ *     lib/providers/zones/zoneData.ts is NOT "unavailable" — it's a real,
+ *     available reading of 0 ("confirmed not in a known risk zone" against
+ *     SafeHaul's v1 curated dataset, not nationwide coverage), origin
+ *     "observed"/state "fresh", same as a real match. Only a stale/
+ *     unavailable location (no lookup could run at all) yields state
+ *     "unavailable". See ZoneAvailability in ./types.ts for the full
+ *     four-way distinction (matched / outside_monitored_zones /
+ *     location_unavailable / location_stale) and why this never fabricates
+ *     a penalty. Demo drivers are unchanged: scenario zoneRisk/zoneName,
  *     simulated/fresh.
  *   - location (Phase 1 — Real GPS): real Samsara GPS for pilot drivers via
  *     the current vehicle stats snapshot (see assembleLocation below) —
@@ -71,6 +78,8 @@ import {
 } from "@/lib/driverEvents";
 import { ensureFreshSamsaraSync, type OnDemandSyncStatus } from "@/lib/providers/samsara/onDemandSync";
 import { fetchSamsaraHosClocks, parseHosClockEntry } from "@/lib/providers/samsara/hos";
+import { recordHosObservation } from "@/lib/providers/samsara/hosObservability";
+import { SamsaraApiError } from "@/lib/providers/samsara/safetyEventsStream";
 import { resolveCurrentVehicleId, type ResolvedVehicleId } from "@/lib/providers/samsara/vehicleId";
 import {
   fetchVehicleGpsSnapshot,
@@ -86,8 +95,10 @@ import type {
   LocationState,
   VehicleLocation,
   WeatherDetail,
+  ZoneAvailability,
   ZoneDetail,
 } from "./types";
+import { ZONE_AVAILABILITY_EXPLANATIONS } from "./types";
 
 const HOS_FETCH_TIMEOUT_MS = 5_000;
 const LOCATION_FETCH_TIMEOUT_MS = 5_000;
@@ -276,6 +287,18 @@ async function assembleHos(
       response.data?.find((d) => d.driver?.id === mapping.externalDriverId) ?? response.data?.[0];
     const parsed = parseHosClockEntry(entry, new Date());
 
+    // Temporary observability (see hosObservability.ts) — fire-and-forget so
+    // it never adds latency to the HOS lookup this /api/risk call is
+    // waiting on; failures are swallowed inside recordHosObservation itself.
+    void recordHosObservation({
+      driverId,
+      externalDriverId: mapping.externalDriverId,
+      clocksReturned: (response.data?.length ?? 0) > 0,
+      emptyReason: (response.data?.length ?? 0) === 0 ? "no_active_clock_entries" : null,
+      providerStatus: 200,
+      providerUpdatedAt: entry?.lastUpdatedAtTime ?? null,
+    });
+
     if (parsed.shiftHoursUsed === null) return unavailable();
 
     return {
@@ -297,6 +320,14 @@ async function assembleHos(
     };
   } catch (err) {
     console.error("[driverContext] Samsara HOS fetch failed:", err instanceof Error ? err.message : err);
+    void recordHosObservation({
+      driverId,
+      externalDriverId: mapping.externalDriverId,
+      clocksReturned: false,
+      emptyReason: "fetch_error",
+      providerStatus: err instanceof SamsaraApiError ? err.status : null,
+      providerUpdatedAt: null,
+    });
     return unavailable();
   } finally {
     clearTimeout(timeoutId);
@@ -575,17 +606,30 @@ export interface AssembleZoneRiskDeps {
   matchZone?: (latitude: number, longitude: number) => ZoneMatch | null;
 }
 
+/** available (matched | outside_monitored_zones) vs. unavailable (location_unavailable | location_stale) — see ZoneAvailability in ./types.ts. */
+function zoneStatusFor(availability: ZoneAvailability): "available" | "unavailable" {
+  return availability === "matched" || availability === "outside_monitored_zones" ? "available" : "unavailable";
+}
+
 /**
  * Resolves zone risk using the already-assembled location (Phase 3 — Real
- * Zone Risk). Takes locationDetail as a parameter, same dependency shape as
- * assembleWeather — never calls the Samsara GPS endpoint independently.
+ * Zone Risk; zone-semantics clarification, 2026-08-04). Takes locationDetail
+ * as a parameter, same dependency shape as assembleWeather — never calls the
+ * Samsara GPS endpoint independently.
  *
  * Pilot: only locationDetail.state === "fresh" may drive a zone lookup —
  * identical gating to assembleWeather, for the identical reason: a position
- * from 10+ minutes ago is not a safe stand-in for "where it is now." No
- * match within any defined zone's radius (lib/providers/zones/zoneData.ts
- * is a v1 curated set, not nationwide coverage) is a legitimate real
- * "unavailable" result, never a fabricated default score.
+ * from 10+ minutes ago is not a safe stand-in for "where it is now." A
+ * stale/unavailable location is a genuine data gap (locationGap below).
+ *
+ * Critically, a fresh GPS reading with NO match within any defined zone's
+ * radius (lib/providers/zones/zoneData.ts is a v1 curated set, not
+ * nationwide coverage) is NOT the same thing as a data gap — the location
+ * itself is available and real, only a curated-zone hit is absent. That is
+ * a genuine, available reading of "outside monitored risk zones," so it
+ * gets a real value of 0 (origin "observed", state "fresh"), never
+ * state "unavailable" and never a fabricated non-zero penalty. See
+ * ZoneAvailability in ./types.ts for the full distinction.
  *
  * Demo: unchanged from before this phase — scenario zoneRisk/zoneName,
  * origin "simulated", state "fresh".
@@ -600,9 +644,10 @@ export async function assembleZoneRisk(
   const matchZoneFn = deps.matchZone ?? matchZone;
   const fetchedAt = now;
 
-  const unavailable = (
-    latitude: number | null,
-    longitude: number | null,
+  // No usable GPS at all — the lookup itself could not run. Distinct from
+  // "ran the lookup, found no match" below (outside_monitored_zones).
+  const locationGap = (
+    availability: "location_unavailable" | "location_stale",
     locationState: LocationState | null,
     locationObservedAt: string | null
   ): { field: DriverContext["zoneRisk"]; detail: ZoneDetail } => ({
@@ -610,13 +655,17 @@ export async function assembleZoneRisk(
     detail: {
       zoneRisk: null,
       zoneName: null,
+      zoneType: null,
+      zoneExplanation: null,
+      availability,
+      explanation: ZONE_AVAILABILITY_EXPLANATIONS[availability],
       status: "unavailable",
       origin: null,
       provider: null,
       observedAt: null,
       fetchedAt,
-      latitude,
-      longitude,
+      latitude: null,
+      longitude: null,
       locationState,
       locationObservedAt,
       matchedZoneId: null,
@@ -631,6 +680,10 @@ export async function assembleZoneRisk(
       detail: {
         zoneRisk: scenario.zoneRisk,
         zoneName: scenario.zoneName,
+        zoneType: null,
+        zoneExplanation: null,
+        availability: "matched",
+        explanation: ZONE_AVAILABILITY_EXPLANATIONS.matched,
         status: "available",
         origin: "simulated",
         provider: null,
@@ -648,12 +701,36 @@ export async function assembleZoneRisk(
 
   // Pilot: only a fresh real GPS location may drive a zone lookup.
   if (locationDetail.state !== "fresh" || locationDetail.latitude === null || locationDetail.longitude === null) {
-    return unavailable(null, null, locationDetail.state, locationDetail.observedAt);
+    const availability = locationDetail.state === "stale" ? "location_stale" : "location_unavailable";
+    return locationGap(availability, locationDetail.state, locationDetail.observedAt);
   }
 
   const match = matchZoneFn(locationDetail.latitude, locationDetail.longitude);
+
   if (!match) {
-    return unavailable(locationDetail.latitude, locationDetail.longitude, locationDetail.state, locationDetail.observedAt);
+    const availability: ZoneAvailability = "outside_monitored_zones";
+    return {
+      field: { value: 0, origin: "observed", state: "fresh", provider: "internal_geofence", observedAt: now },
+      detail: {
+        zoneRisk: 0,
+        zoneName: null,
+        zoneType: null,
+        zoneExplanation: null,
+        availability,
+        explanation: ZONE_AVAILABILITY_EXPLANATIONS[availability],
+        status: zoneStatusFor(availability),
+        origin: "observed",
+        provider: "internal_geofence",
+        observedAt: now,
+        fetchedAt,
+        latitude: locationDetail.latitude,
+        longitude: locationDetail.longitude,
+        locationState: locationDetail.state,
+        locationObservedAt: locationDetail.observedAt,
+        matchedZoneId: null,
+        distanceMiles: null,
+      },
+    };
   }
 
   return {
@@ -661,6 +738,10 @@ export async function assembleZoneRisk(
     detail: {
       zoneRisk: match.zone.riskScore,
       zoneName: match.zone.name,
+      zoneType: match.zone.type ?? null,
+      zoneExplanation: match.zone.explanation ?? null,
+      availability: "matched",
+      explanation: ZONE_AVAILABILITY_EXPLANATIONS.matched,
       status: "available",
       origin: "observed",
       provider: "internal_geofence",

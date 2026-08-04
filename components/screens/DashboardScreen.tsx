@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { RiskInput, RiskOutput } from "@/lib/riskEngine";
-import type { ContextSources, ContextStatus, HosDetail } from "@/lib/driverContext/types";
+import type { ContextSources, ContextStatus, HosDetail, ZoneDetail } from "@/lib/driverContext/types";
 import { useTelegram } from "@/lib/useTelegram";
 import { resolveDisplayName } from "@/lib/driverIdentity";
 import type { DriverLocation } from "@/lib/location";
@@ -43,6 +43,7 @@ interface RiskResponse {
   contextSources: ContextSources;
   liveData: LiveData | null;
   hos: HosDetail;
+  zone: ZoneDetail;
   todaySummary: TodaySummary;
   input: RiskInput;
   result: RiskOutput;
@@ -140,21 +141,40 @@ const DISCLOSURE_FIELDS: { key: keyof ContextSources; label: string }[] = [
   { key: "hos",          label: "HOS" },
   { key: "speed",        label: "Speed" },
   { key: "weather",      label: "Weather" },
-  { key: "zoneRisk",     label: "Zone risk" },
 ];
 
 /**
- * Builds the "what's live vs. cached vs. unavailable vs. demo" disclosure
- * shown for partial_live — generated entirely from contextSources, never
- * hardcoded, and every field goes through the exact same fieldStatusPhrase
- * so none can read more or less "live" than its actual contextSources state
- * says it is.
+ * Zone risk gets its own phrase instead of going through fieldStatusPhrase's
+ * generic live/cached/unavailable/fallback classification. A pilot's zone
+ * field is never "unavailable" merely because no curated zone matched a
+ * valid GPS fix (see ZoneAvailability in lib/driverContext/types.ts) — that
+ * distinction only exists on `zone` (ZoneDetail), not on the generic
+ * ContextSources metadata, so it has to be read from `zone` directly. Demo
+ * accounts (contextSources.zoneRisk classified as "fallback") keep the
+ * existing "Demo Data" wording, unchanged.
  */
-function buildPartialLiveDisclosure(sources: ContextSources): string {
+function zoneStatusPhrase(meta: FieldMeta, zone: ZoneDetail | undefined, now: Date): string {
+  if (classifySpecial(meta) === "fallback") return fieldStatusPhrase("Zone risk", meta, now);
+  if (!zone) return fieldStatusPhrase("Zone risk", meta, now);
+
+  if (zone.availability === "matched") {
+    return zone.zoneName ? `Zone risk: Live (SafeHaul Zones) — ${zone.zoneName}.` : "Zone risk: Live (SafeHaul Zones).";
+  }
+  return `Zone risk: ${zone.explanation}.`;
+}
+
+/**
+ * Builds the "what's live vs. cached vs. unavailable vs. demo" disclosure
+ * shown for partial_live — generated entirely from contextSources (and,
+ * for zone risk, the richer ZoneDetail), never hardcoded, so no field can
+ * read more or less "live"/"available" than its actual backend state says
+ * it is.
+ */
+function buildPartialLiveDisclosure(sources: ContextSources, zone: ZoneDetail | undefined): string {
   const now = new Date();
-  return DISCLOSURE_FIELDS
-    .map(({ key, label }) => fieldStatusPhrase(label, sources[key], now))
-    .join(" ");
+  const phrases = DISCLOSURE_FIELDS.map(({ key, label }) => fieldStatusPhrase(label, sources[key], now));
+  phrases.push(zoneStatusPhrase(sources.zoneRisk, zone, now));
+  return phrases.join(" ");
 }
 
 /** "A, B and C" — small local join, same shape as the joinWithAnd() helper Phase 5 removed elsewhere, kept minimal since missingContext never exceeds 3 items (weather/zone/HOS). */
@@ -475,7 +495,7 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
                 </div>
                 {riskData.contextStatus === "partial_live" && (
                   <div style={{ fontSize: 11.5, color: "var(--text-tertiary)", marginTop: 8, lineHeight: 1.4 }}>
-                    {buildPartialLiveDisclosure(riskData.contextSources)}
+                    {buildPartialLiveDisclosure(riskData.contextSources, riskData.zone)}
                     {/* Demo accounts only (dataSource "mock") — appended, never replacing the
                         per-field technical breakdown above. Real pilot drivers on a partial_live
                         connection (dataSource "real") see the breakdown exactly as before. */}
