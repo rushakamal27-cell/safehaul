@@ -162,19 +162,41 @@ const CURSOR_REFERENCE_TERMS = ["cursor", "after"];
 const CURSOR_INVALIDITY_TERMS = ["expired", "invalid", "stale", "no longer valid", "not found", "unknown"];
 
 /**
- * Pure — distinguishes a genuine Samsara "cursor is invalid/expired" error
- * from any other 400/422 (missing params, bad driver IDs, auth, rate limits,
+ * Samsara's literal wording (confirmed live, 2026-08-04 pagination incident)
+ * when a continuation request's parameters don't match the request that
+ * minted the cursor — e.g. a differently-ordered `driverIds` string (see
+ * Step 1's determinism fix above). This message never mentions "cursor" or
+ * "after" by name, so it can't be caught by CURSOR_REFERENCE_TERMS +
+ * CURSOR_INVALIDITY_TERMS below — matched by its own narrow, exact phrase
+ * instead of loosening that pair (which would risk reclassifying unrelated
+ * generic 400s, e.g. "driverIds contains an invalid ID", as cursor errors).
+ * It IS a genuine cursor/query-binding failure: the cursor is unusable with
+ * any parameter set other than the one it was minted under, so clearing it
+ * and retrying via a fresh cold start is the correct, safe recovery — same
+ * as any other cursor-specific error.
+ */
+const CURSOR_PARAMETER_MISMATCH_PHRASE = "parameters differ from previous paginated request";
+
+/**
+ * Pure — distinguishes a genuine Samsara cursor/query-binding failure from
+ * any other 400/422 (missing params, bad driver IDs, auth, rate limits,
  * etc.). Only the former should ever clear a saved cursor. Samsara does not
  * expose a structured error code for this — we conservatively inspect the
- * `message` field of the JSON error body and require BOTH a reference to the
- * cursor/after value AND explicit invalidity wording. A message that only
- * references the cursor ("cursor is required", "cursor format parameter is
- * missing", "request failed while processing cursor pagination") is NOT
- * enough on its own — those are generic validation errors that happen to
- * mention the parameter name, not evidence the cursor itself is bad. Any
- * error that can't be confidently tied to genuine cursor invalidity is
- * treated as generic (fail-safe: prefer keeping a possibly-still-good cursor
- * over wiping one on a false positive, which is exactly the bug being fixed).
+ * `message` field of the JSON error body.
+ *
+ * Two independent ways a message can qualify:
+ *   1. It matches CURSOR_PARAMETER_MISMATCH_PHRASE exactly (see above) — a
+ *      confirmed, narrow, real Samsara error string.
+ *   2. It references the cursor/after value AND carries explicit invalidity
+ *      wording. A message that only references the cursor ("cursor is
+ *      required", "cursor format parameter is missing", "request failed
+ *      while processing cursor pagination") is NOT enough on its own — those
+ *      are generic validation errors that happen to mention the parameter
+ *      name, not evidence the cursor itself is bad.
+ *
+ * Any error that doesn't match either path is treated as generic (fail-safe:
+ * prefer keeping a possibly-still-good cursor over wiping one on a false
+ * positive).
  */
 export function isCursorSpecificError(err: unknown): boolean {
   if (!(err instanceof SamsaraApiError)) return false;
@@ -189,6 +211,9 @@ export function isCursorSpecificError(err: unknown): boolean {
   }
 
   const lower = message.toLowerCase();
+
+  if (lower.includes(CURSOR_PARAMETER_MISMATCH_PHRASE)) return true;
+
   const referencesCursor = CURSOR_REFERENCE_TERMS.some((term) => lower.includes(term));
   const indicatesInvalidity = CURSOR_INVALIDITY_TERMS.some((term) => lower.includes(term));
   return referencesCursor && indicatesInvalidity;
@@ -199,6 +224,8 @@ export interface PilotMappingClient {
   findMany(args: {
     where: { provider: string; isPilot: true; isActive: true };
     select: { externalDriverId: true };
+    /** Best-effort hint only — see resolvePilotDriverIds's explicit .sort(), which is the actual determinism guarantee, not this. */
+    orderBy?: { externalDriverId: "asc" };
   }): Promise<Array<{ externalDriverId: string }>>;
 }
 
@@ -413,13 +440,28 @@ export async function runSamsaraSafetyEventsSync(
 
   // ── Step 1: Fetch pilot driver IDs for Samsara-side pre-filtering ─────────
   // Only events for these drivers are fetched — avoids processing the entire fleet.
+  //
+  // Root cause (2026-08-04 pagination incident): Samsara's stream binds a
+  // pagination cursor to the exact literal `driverIds` query string used to
+  // mint it — not just startTime. Postgres gives no ordering guarantee for a
+  // SELECT without ORDER BY, so this same pilot SET could serialize into a
+  // different comma-joined string across two otherwise-identical sync
+  // invocations, and Samsara rejects the mismatch with a 400 "Parameters
+  // differ from previous paginated request." — confirmed live: resending the
+  // exact same stuck cursor+startTime with only the driverIds order swapped
+  // flipped the response from 400 to 200. `orderBy` below is a best-effort
+  // hint (and self-documenting), but the explicit `.sort()` is the actual
+  // guarantee — it makes the final query string deterministic regardless of
+  // what order the DB (or a test fake) hands back, which is what
+  // buildSafetyEventsStreamUrl actually serializes.
   let pilotDriverIds: string[] = [];
   try {
     const mappings = await mappingClient.findMany({
       where: { provider: PROVIDER, isPilot: true, isActive: true },
       select: { externalDriverId: true },
+      orderBy: { externalDriverId: "asc" },
     });
-    pilotDriverIds = mappings.map((m) => m.externalDriverId);
+    pilotDriverIds = mappings.map((m) => m.externalDriverId).sort();
   } catch (err) {
     console.error("[sync/samsara] Failed to fetch pilot driver mappings:", err);
     return {
