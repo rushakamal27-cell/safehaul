@@ -37,30 +37,16 @@
 import { getDriverVehicleContext, getDriverDailySummary } from "@/lib/samsara";
 import { fetchTodaySummaryData } from "@/lib/todaySummary";
 import { assembleLocation, assembleWeather, assembleZoneRisk, assembleSpeed } from "@/lib/driverContext/assemble";
-import type { LocationState } from "@/lib/driverContext/types";
+import type { LocationApiResponse } from "@/lib/api/location";
 
-export type CardinalHeading = "N" | "NE" | "E" | "SE" | "S" | "SW" | "W" | "NW";
+// The response type (LocationApiResponse) and its field-by-field meaning —
+// driverId/lat/lng/locationLabel/zoneName/zoneRisk/currentSpeed/heading/
+// weatherRisk/checksPassed/milesDriven/updatedAt/origin/state — now live in
+// lib/api/location.ts (N4, Phase 5, 2026-08-05), the shared, zero-server-
+// dependency module both this file and client components import from. See
+// that file for the full field comments (unchanged from before this move).
 
-export interface DriverLocation {
-  driverId: string;
-  lat: number | null;
-  lng: number | null;
-  locationLabel: string | null;   // Human-readable current location
-  zoneName: string | null;        // Named operational zone if active; null when demo has none active or pilot GPS didn't match a curated zone
-  zoneRisk: number | null;        // Normalized 0–1 zone risk score; null when unavailable (demo: none active: pilot: no real match/stale GPS)
-  currentSpeed: number | null;    // mph; null when unavailable (pilot: stale/unavailable GPS or no speed reading)
-  heading: CardinalHeading | null; // TODO: real for pilots would require deriving cardinal direction from detail.headingDegrees — not done yet, still null for pilots
-  weatherRisk: number | null;     // Normalized 0–1 weather risk score; null when pilot weather is unavailable
-  checksPassed: number;           // Daily pre-trip / roadside inspection checks passed
-  milesDriven: number | null;     // Miles driven today
-  updatedAt: string;              // ISO 8601 timestamp — when this response was built
-  /** Trust provenance for lat/lng/locationLabel — "observed" (pilot, real GPS attempt) or "simulated" (demo, mock scenario). Never absent. */
-  origin: "observed" | "simulated";
-  /** Matches /api/risk's location.state exactly for pilots (same assembleLocation call); "fresh" for demo (intentional, not a gap). */
-  state: LocationState;
-}
-
-export async function getMockDriverLocation(driverId: string): Promise<DriverLocation> {
+export async function getMockDriverLocation(driverId: string): Promise<LocationApiResponse> {
   const [vehicle, daily] = await Promise.all([
     getDriverVehicleContext(driverId),
     getDriverDailySummary(driverId),
@@ -98,15 +84,15 @@ export async function getMockDriverLocation(driverId: string): Promise<DriverLoc
  * transparency reason DriverContext.location preserves stale coordinates
  * rather than hiding them. zoneName/zoneRisk/currentSpeed/weatherRisk can
  * each independently be null (e.g. GPS outside every curated zone, or a
- * failed weather call) even when `state` is "fresh" — see the DriverLocation
- * field comments above.
+ * failed weather call) even when `state` is "fresh" — see the
+ * LocationApiResponse field comments in lib/api/location.ts.
  *
  * Deliberately does NOT call assembleSafetyEvents/assembleHos (i.e. not the
  * full assembleDriverContext) — those would trigger an on-demand Samsara
  * sync and an extra HOS call this endpoint has never made and doesn't need,
  * just to answer a location/weather/zone/speed question.
  */
-export async function getPilotDriverLocation(driverId: string): Promise<DriverLocation> {
+export async function getPilotDriverLocation(driverId: string): Promise<LocationApiResponse> {
   const now = new Date().toISOString();
   const [{ detail }, summary] = await Promise.all([
     assembleLocation(driverId, true, now),

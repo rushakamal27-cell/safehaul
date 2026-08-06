@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useTelegram } from "@/lib/useTelegram";
 import { AuditEvent } from "@/lib/audit";
-import type { DriverLocation } from "@/lib/location";
+import type { LocationApiResponse } from "@/lib/api/location";
 import {
   LogIn, CheckCircle2, Truck, ClipboardCheck, AlertTriangle,
   Zap, ChevronRight, BarChart2, TrendingUp, Calendar,
@@ -180,7 +180,7 @@ export function AuditScreen({
   const telegramUser = useTelegram();
 
   const [events,   setEvents]   = useState<AuditEvent[]>([]);
-  const [location, setLocation] = useState<DriverLocation | null>(null);
+  const [location, setLocation] = useState<LocationApiResponse | null>(null);
   const [loading,  setLoading]  = useState(true);
   const [error,    setError]    = useState<string | null>(null);
   const [showAll,  setShowAll]  = useState(false);

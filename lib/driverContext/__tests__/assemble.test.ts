@@ -745,3 +745,98 @@ describe("assembleSpeed", () => {
     });
   });
 });
+
+// N1 (Phase 5, 2026-08-05) — assembleDriverContext threads ONE `now` value
+// into every field's `fetchedAt`, and returns that same value as
+// `calculatedAt` for callers (e.g. /api/risk) to reuse as their own
+// top-level response timestamp, instead of independently computing a
+// second `new Date()`. assembleDriverContext itself isn't called directly
+// in this file (see the file-header note — it isn't dependency-injectable
+// at the top level, and would reach getWeatherRiskField's real network
+// call). Instead, this proves the same guarantee one level down, using the
+// individually-injectable functions assembleDriverContext composes:
+// location/weather/zone's `detail.fetchedAt` must all agree when given the
+// same `now`, which is exactly the mechanism `calculatedAt` relies on.
+describe("assembleDriverContext's single-`now` guarantee (N1 — one calculation timestamp)", () => {
+  const NOW_ISO = "2026-07-22T01:33:40.000Z";
+
+  const TEST_ZONE: ZoneDefinition = {
+    id: "test-zone",
+    name: "Test Zone",
+    latitude: 35.078091,
+    longitude: -81.721605,
+    radiusMiles: 10,
+    riskScore: 0.5,
+  };
+
+  test("location/weather/zone fetchedAt all equal the same injected `now`, for a pilot with fresh GPS", async () => {
+    const { detail: locationDetail } = await assembleLocation("drv_1", true, NOW_ISO, {
+      resolveVehicleId: async () => ({ vehicleId: "1000000000001", source: "driver_event" }),
+      fetchGpsSnapshot: async () => ({
+        data: [{
+          id: "1000000000001",
+          gps: {
+            time: "2026-07-22T01:33:35.000Z", // event time — deliberately NOT equal to NOW_ISO
+            latitude: 35.078091,
+            longitude: -81.721605,
+          },
+        }],
+        pagination: { endCursor: "", hasNextPage: false },
+      }),
+    });
+
+    const { detail: weatherDetail } = await assembleWeather("drv_1", true, NOW_ISO, locationDetail, {
+      fetchWeather: async () => ({ weatherRisk: 0.2, observedAt: "2026-07-22T01:20:00.000Z", conditionSummary: "clear" }),
+    });
+
+    const { detail: zoneDetail } = await assembleZoneRisk("drv_1", true, NOW_ISO, locationDetail, {
+      matchZone: () => ({ zone: TEST_ZONE, distanceMiles: 0 }),
+    });
+
+    // The calculation-time invariant: every domain's fetchedAt is the same
+    // instant assembleDriverContext would return as `calculatedAt`.
+    assert.equal(locationDetail.fetchedAt, NOW_ISO);
+    assert.equal(weatherDetail.fetchedAt, NOW_ISO);
+    assert.equal(zoneDetail.fetchedAt, NOW_ISO);
+
+    // Do not misrepresent provider event timestamps as calculation
+    // timestamps: observedAt (the provider's own event time) must remain
+    // free to differ from fetchedAt (SafeHaul's calculation instant) —
+    // proving the two are tracked independently, not silently unified.
+    assert.equal(locationDetail.observedAt, "2026-07-22T01:33:35.000Z");
+    assert.notEqual(locationDetail.observedAt, locationDetail.fetchedAt);
+    assert.equal(weatherDetail.observedAt, "2026-07-22T01:20:00.000Z");
+    assert.notEqual(weatherDetail.observedAt, weatherDetail.fetchedAt);
+  });
+
+  test("fetchedAt still agrees across domains even when location is stale (weather/zone become unavailable, but their fetchedAt — the attempt time — is still the shared `now`)", async () => {
+    const { detail: locationDetail } = await assembleLocation("drv_1", true, NOW_ISO, {
+      resolveVehicleId: async () => ({ vehicleId: "1000000000001", source: "driver_event" }),
+      fetchGpsSnapshot: async () => ({
+        data: [{
+          id: "1000000000001",
+          gps: { time: "2026-07-22T01:03:40.000Z", latitude: 35.078091, longitude: -81.721605 }, // 30 min old -> stale
+        }],
+        pagination: { endCursor: "", hasNextPage: false },
+      }),
+    });
+    assert.equal(locationDetail.state, "stale");
+
+    const { detail: weatherDetail } = await assembleWeather("drv_1", true, NOW_ISO, locationDetail, {
+      fetchWeather: async () => { throw new Error("must not be called for stale location"); },
+    });
+    const { detail: zoneDetail } = await assembleZoneRisk("drv_1", true, NOW_ISO, locationDetail, {
+      matchZone: () => { throw new Error("must not be called for stale location"); },
+    });
+
+    assert.equal(weatherDetail.status, "unavailable");
+    assert.equal(zoneDetail.availability, "location_stale");
+
+    // Even on the unavailable path, fetchedAt still reflects the shared
+    // calculation instant, not null/omitted — the attempt happened at `now`
+    // even though it produced no value.
+    assert.equal(locationDetail.fetchedAt, NOW_ISO);
+    assert.equal(weatherDetail.fetchedAt, NOW_ISO);
+    assert.equal(zoneDetail.fetchedAt, NOW_ISO);
+  });
+});

@@ -23,7 +23,7 @@ import { SamsaraApiError } from "./safetyEventsStream";
 const SAMSARA_API_BASE = "https://api.samsara.com";
 const HOS_CLOCKS_PATH = "/fleet/hos/clocks";
 
-/** HOS clock data is treated as stale (not silently "available") once older than this. */
+/** HOS clock data is treated as stale (not silently "available") once older than this. See docs/data-freshness.md for how this compares to the other freshness thresholds in the codebase. */
 const STALE_THRESHOLD_MS = 30 * 60 * 1000;
 
 export interface SamsaraHosClockEntry {

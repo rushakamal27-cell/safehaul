@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { deriveContextStatus } from "../contextStatus";
+import { deriveContextStatus, deriveDataCompleteness } from "../contextStatus";
 import { toContextSources } from "../toContextSources";
 import type { DriverContext, DriverContextField } from "../types";
 
@@ -102,6 +102,95 @@ describe("deriveContextStatus", () => {
       zoneRisk: field({ value: 0.1, ...SIMULATED_FRESH }),
     });
     assert.equal(deriveContextStatus(ctx), "demo");
+  });
+});
+
+// N5 (Phase 5, 2026-08-05) — deriveDataCompleteness counts all SIX
+// DriverContext fields (unlike deriveContextStatus, which only looks at
+// the five RiskInput-backing fields and deliberately excludes location).
+describe("deriveDataCompleteness", () => {
+  test("all six fields observed/fresh -> 6 of 6", () => {
+    assert.deepEqual(deriveDataCompleteness(context()), { count: 6, total: 6 });
+  });
+
+  test("total is always 6, never driver-dependent, even when every field is unavailable", () => {
+    const ctx = context({
+      safetyEvents: field({ ...UNAVAILABLE }),
+      hos: field<number>({ ...UNAVAILABLE }),
+      speed: field<number>({ ...UNAVAILABLE }),
+      weather: field<number>({ ...UNAVAILABLE }),
+      zoneRisk: field<number>({ ...UNAVAILABLE }),
+      location: field<{ latitude: number; longitude: number }>({ ...UNAVAILABLE }),
+    });
+    assert.deepEqual(deriveDataCompleteness(ctx), { count: 0, total: 6 });
+  });
+
+  test("observed/cached counts as live, same as deriveContextStatus's own full_live definition", () => {
+    const ctx = context({ safetyEvents: field({ value: [], ...OBSERVED_CACHED }) });
+    assert.deepEqual(deriveDataCompleteness(ctx), { count: 6, total: 6 });
+  });
+
+  test("demo inputs (simulated/fresh) never count as live, even though state is 'fresh'", () => {
+    const ctx = context({
+      safetyEvents: field({ value: [], ...SIMULATED_FRESH }),
+      hos: field({ value: 5, ...SIMULATED_FRESH }),
+      speed: field({ value: 60, ...SIMULATED_FRESH }),
+      weather: field({ value: 0.2, ...SIMULATED_FRESH }),
+      zoneRisk: field({ value: 0.2, ...SIMULATED_FRESH }),
+      location: field({ value: { latitude: 0, longitude: 0 }, ...SIMULATED_FRESH }),
+    });
+    assert.deepEqual(deriveDataCompleteness(ctx), { count: 0, total: 6 }, "a fully-demo DriverContext must read 0 of 6, not 6 of 6");
+  });
+
+  test("a demo account with genuinely live weather (real OpenWeatherMap success) correctly counts that one field, per its real origin", () => {
+    // Mirrors assembleWeather's actual demo-branch behavior: origin becomes
+    // "observed" when the real API call succeeds, even for a non-pilot
+    // driver — deriveDataCompleteness must count it, same as any other
+    // genuinely observed field, with no separate pilot/demo branch needed.
+    const ctx = context({
+      safetyEvents: field({ value: [], ...SIMULATED_FRESH }),
+      hos: field({ value: 5, ...SIMULATED_FRESH }),
+      speed: field({ value: 60, ...SIMULATED_FRESH }),
+      weather: field({ value: 0.2, ...OBSERVED_FRESH }),
+      zoneRisk: field({ value: 0.2, ...SIMULATED_FRESH }),
+      location: field({ value: { latitude: 0, longitude: 0 }, ...SIMULATED_FRESH }),
+    });
+    assert.deepEqual(deriveDataCompleteness(ctx), { count: 1, total: 6 });
+  });
+
+  test("unavailable location alone: 5 of 6, while deriveContextStatus still reads full_live — the two are not the same denominator", () => {
+    const ctx = context({ location: field<{ latitude: number; longitude: number }>({ ...UNAVAILABLE }) });
+    assert.deepEqual(deriveDataCompleteness(ctx), { count: 5, total: 6 });
+    assert.equal(deriveContextStatus(ctx), "full_live", "confirms location's exclusion from contextStatus, unaffected by this change");
+  });
+
+  test("fallback fields (pilot, not-yet-integrated) do not count as live", () => {
+    const ctx = context({
+      hos: field({ value: 5, ...SIMULATED_FALLBACK }),
+      speed: field({ value: 60, ...SIMULATED_FALLBACK }),
+      zoneRisk: field({ value: 0.2, ...SIMULATED_FALLBACK }),
+    });
+    assert.deepEqual(deriveDataCompleteness(ctx), { count: 3, total: 6 });
+  });
+
+  test("current real pilot DriverContext shape (real events, mock hos/speed/zoneRisk, real weather/location) -> 3 of 6", () => {
+    const ctx = context({
+      safetyEvents: field({ value: [{ type: "harsh_braking", severity: 3 }], ...OBSERVED_FRESH }),
+      hos: field({ value: 6, ...SIMULATED_FALLBACK }),
+      speed: field({ value: 58, ...SIMULATED_FALLBACK }),
+      zoneRisk: field({ value: 0.4, ...SIMULATED_FALLBACK }),
+      weather: field({ value: 0.42, ...OBSERVED_FRESH }),
+      location: field({ value: { latitude: 33.7, longitude: -84.4 }, ...OBSERVED_FRESH }),
+    });
+    assert.deepEqual(deriveDataCompleteness(ctx), { count: 3, total: 6 });
+  });
+
+  test("weighting is never applied — a single unavailable field always costs exactly 1, regardless of which field it is", () => {
+    const missingWeather = deriveDataCompleteness(context({ weather: field<number>({ ...UNAVAILABLE }) }));
+    const missingSafetyEvents = deriveDataCompleteness(context({ safetyEvents: field({ ...UNAVAILABLE }) }));
+    assert.deepEqual(missingWeather, { count: 5, total: 6 });
+    assert.deepEqual(missingSafetyEvents, { count: 5, total: 6 });
+    assert.deepEqual(missingWeather, missingSafetyEvents, "every field contributes equally to the count — no per-field weighting");
   });
 });
 

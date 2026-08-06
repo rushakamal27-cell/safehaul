@@ -26,6 +26,7 @@
  */
 
 export type FieldOrigin = "observed" | "estimated" | "simulated";
+/** One of four freshness/availability vocabularies in this codebase — see docs/data-freshness.md for the full cross-reference (LocationState, ZoneAvailability, HosDetail.status are the others, each with their own value set and thresholds). */
 export type FieldState = "fresh" | "cached" | "fallback" | "unavailable";
 /** "internal" marks simulated/demo data; "internal_geofence" (Phase 3) marks a real match against SafeHaul's own bundled zone dataset — kept distinct so a real pilot result is never confused with a mock one. */
 export type ProviderId = "samsara" | "openweather" | "internal" | "internal_geofence" | null;
@@ -99,6 +100,7 @@ export interface HosDetail {
   drivingHoursUsed: number | null;
   drivingHoursRemaining: number | null;
   shiftHoursUsed: number | null;
+  /** Own 3-value vocabulary, distinct from FieldState/LocationState/ZoneAvailability — threshold in lib/providers/samsara/hos.ts. See docs/data-freshness.md. */
   status: "available" | "unavailable" | "stale";
   source: "samsara" | "mock" | "none";
   updatedAt: string | null;
@@ -112,6 +114,7 @@ export interface HosDetail {
  * fallback. See lib/driverContext/assemble.ts::classifyLocationFreshness
  * for the threshold logic and lib/driverContext/types.ts's DriverContext.location
  * comment for why this doesn't yet affect contextStatus.
+ * See docs/data-freshness.md for how this relates to FieldState/ZoneAvailability/HosDetail.status.
  */
 export type LocationState = "fresh" | "stale" | "unavailable";
 
@@ -188,7 +191,8 @@ export interface WeatherDetail {
  * Distinguishes *why* zoneRisk has (or lacks) a curated-zone match, so a
  * valid GPS reading with no monitored-zone coverage is never conflated with
  * a missing/stale GPS reading — see the "clarify Risk Zone availability
- * semantics" investigation (2026-08-04).
+ * semantics" investigation (2026-08-04). One of four freshness/availability
+ * vocabularies in this codebase — see docs/data-freshness.md.
  *
  *   matched                 — fresh real GPS, inside a curated zone's radius.
  *   outside_monitored_zones — fresh real GPS, but no curated zone contains

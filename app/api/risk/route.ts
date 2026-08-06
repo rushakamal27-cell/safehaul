@@ -5,13 +5,21 @@ import { isPilotDriver } from "@/lib/driverEvents";
 import { assembleDriverContext } from "@/lib/driverContext/assemble";
 import { toRiskInput } from "@/lib/driverContext/toRiskInput";
 import { toContextSources } from "@/lib/driverContext/toContextSources";
-import { deriveContextStatus } from "@/lib/driverContext/contextStatus";
+import { deriveContextStatus, deriveDataCompleteness } from "@/lib/driverContext/contextStatus";
 import { fetchTodaySummaryData } from "@/lib/todaySummary";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/lib/generated/prisma";
 import { getOrCreateTodayTrip } from "@/lib/trip";
+import type { ApiErrorResponse } from "@/lib/api/common";
+import type { RiskApiResponse } from "@/lib/api/risk";
 
-export async function GET(request: NextRequest) {
+// Return type is explicitly checked against the shared contract
+// (lib/api/risk.ts) both routes and client components import — an object
+// literal returned as NextResponse<RiskApiResponse> that's missing a field,
+// has an extra one, or mismatches a field's type fails `tsc --noEmit`
+// immediately (N4, Phase 5, 2026-08-05), instead of silently drifting from
+// what DashboardScreen.tsx's now-shared type expects.
+export async function GET(request: NextRequest): Promise<NextResponse<RiskApiResponse | ApiErrorResponse>> {
   const driverId = request.nextUrl.searchParams.get("driverId");
 
   if (!driverId) {
@@ -21,6 +29,24 @@ export async function GET(request: NextRequest) {
     );
   }
 
+  try {
+    return await buildRiskResponse(driverId);
+  } catch (error) {
+    // Server-side only: full error (including stack) for debugging, plus
+    // the internal driverId for correlation — never sent to the client.
+    // Never logs provider payloads or raw DB row contents, only whatever
+    // the thrown error itself carries (typically a message/stack, per
+    // Node's default Error shape) — matches the existing precedent in
+    // app/api/driver/route.ts and app/api/incident/route.ts.
+    console.error(`[api/risk] Unhandled error for driverId=${driverId}:`, error);
+    return NextResponse.json(
+      { error: "Unable to compute risk data right now. Please try again." },
+      { status: 500 }
+    );
+  }
+}
+
+async function buildRiskResponse(driverId: string): Promise<NextResponse<RiskApiResponse>> {
   const pilotDriver = await isPilotDriver(driverId);
 
   const [assembled, vehicle, tripId, summaryData] = await Promise.all([
@@ -34,6 +60,7 @@ export async function GET(request: NextRequest) {
   const input = toRiskInput(context);
   const contextSources = toContextSources(context);
   const contextStatus = deriveContextStatus(context);
+  const dataCompleteness = deriveDataCompleteness(context);
   const result = calculateRisk(input);
   const alertsActive = result.factors.length;
 
@@ -126,7 +153,13 @@ export async function GET(request: NextRequest) {
 
   return NextResponse.json({
     driverId,
-    timestamp:  new Date().toISOString(),
+    // Reuses assembleDriverContext's own calculation instant rather than a
+    // second, independently-computed `new Date()` — guarantees this equals
+    // location.fetchedAt/weather.fetchedAt/zone.fetchedAt below, all of
+    // which are threaded from that same instant. This is a SafeHaul
+    // calculation timestamp, not a provider event timestamp — see
+    // docs/data-freshness.md.
+    timestamp:  assembled.calculatedAt,
     // dataSource: which connection path this driver is on (pilot provider vs.
     // demo). Kept for backward compatibility — do not rename/remove yet.
     // contextStatus is the field that should be trusted for "is this score
@@ -137,6 +170,15 @@ export async function GET(request: NextRequest) {
     // when the truck's position is stale, even if HOS/safety events are fine.
     dataSource: pilotDriver ? "real" : "mock",
     contextStatus,
+    // dataCompleteness (N5, Phase 5, 2026-08-05): a plain live/total count
+    // across all six DriverContext fields (including location, unlike
+    // contextStatus's own five-field set) — see
+    // lib/driverContext/contextStatus.ts::deriveDataCompleteness for the
+    // full derivation and the documented caveat that its total (6) is not
+    // the same denominator as contextStatus's own full_live/partial_live
+    // computation. Deliberately not a confidence/accuracy/reliability
+    // measure — see that function's doc comment.
+    dataCompleteness,
     contextSources,
     liveData,
     hos: hosDetail,

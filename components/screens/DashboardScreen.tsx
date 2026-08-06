@@ -1,53 +1,28 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { RiskInput, RiskOutput } from "@/lib/riskEngine";
-import type { ContextSources, ContextStatus, HosDetail, ZoneDetail } from "@/lib/driverContext/types";
+import type { ContextStatus } from "@/lib/driverContext/types";
 import { useTelegram } from "@/lib/useTelegram";
 import { resolveDisplayName } from "@/lib/driverIdentity";
-import type { DriverLocation } from "@/lib/location";
+import type { LocationApiResponse } from "@/lib/api/location";
+import type { RiskApiResponse } from "@/lib/api/risk";
+import {
+  PROVIDER_LABELS,
+  buildPartialLiveDisclosure,
+} from "@/lib/dashboardDisclosure";
 import {
   Cloud, Moon, Gauge, MapPin, Smartphone, AlertTriangle,
   Wrench, Info, ChevronRight, TriangleAlert,
 } from "lucide-react";
 
-// ── Types (unchanged) ──────────────────────────────────────────────────────────
-
-interface LiveData {
-  provider: string;
-  lastEventType: string | null;
-  lastEventTimestamp: string | null;
-  lastSyncTime: string | null;
-  driverEventCount24h: number;
-}
-
-interface TodaySummary {
-  checksPassed: number;
-  milesDriven: number | null;
-  alertsActive: number;
-  timezone: string;
-  dataStatus: {
-    checks: "available" | "unavailable";
-    mileage: "available" | "unavailable";
-    alerts: "available" | "unavailable";
-  };
-}
-
-interface RiskResponse {
-  driverId: string;
-  timestamp: string;
-  // Connection path (pilot provider vs. demo) — kept for backward
-  // compatibility. Use contextStatus for "is this score actually live".
-  dataSource: "real" | "mock";
-  contextStatus: ContextStatus;
-  contextSources: ContextSources;
-  liveData: LiveData | null;
-  hos: HosDetail;
-  zone: ZoneDetail;
-  todaySummary: TodaySummary;
-  input: RiskInput;
-  result: RiskOutput;
-}
+// RiskResponse/LiveData/TodaySummary used to be hand-declared here and had
+// already drifted from what GET /api/risk actually returns (they omitted
+// `location`, `weather`, `input`, and `liveData.syncStatus`). N4 (Phase 5,
+// 2026-08-05) replaces them with RiskApiResponse, imported from
+// lib/api/risk.ts — the same shared, server-dependency-free type
+// app/api/risk/route.ts's response is built to match. See that file for
+// the full shape. Likewise, DriverLocation is now LocationApiResponse,
+// imported from lib/api/location.ts.
 
 // ── Design helpers ─────────────────────────────────────────────────────────────
 
@@ -60,122 +35,18 @@ const LEVEL_CONFIG: Record<string, {
   CRITICAL: { color: "var(--red)",     label: "Critical Risk", bg: "var(--red-dim)",     border: "var(--red-border)"     },
 };
 
-// Covers both liveData.provider (a raw provider id string, e.g. "samsara")
-// and ContextSources' per-field provider (which also includes the
-// non-telematics providers below) — one shared label map for both uses.
-const PROVIDER_LABELS: Record<string, string> = {
-  samsara:            "Samsara",
-  motive:             "Motive",
-  geotab:             "Geotab",
-  openweather:        "OpenWeatherMap",
-  internal_geofence:  "SafeHaul Zones",
-  internal:           "Demo",
-};
+// PROVIDER_LABELS, classifySpecial, fieldStatusPhrase, zoneStatusPhrase,
+// safetyEventsStatusPhrase, and buildPartialLiveDisclosure now live in
+// lib/dashboardDisclosure.ts (N2, Phase 5, 2026-08-05) — moved so this
+// logic is unit-testable under the project's standard lib/**/__tests__
+// convention, which .tsx component files have no harness for. See that
+// module for the up-to-date doc comments.
 
 const CONTEXT_STATUS_CONFIG: Record<ContextStatus, { color: string; statusLabel: string }> = {
   full_live:    { color: "var(--green)",         statusLabel: "Fully live"     },
   partial_live: { color: "var(--warning)",       statusLabel: "Partially live" },
   demo:         { color: "var(--text-tertiary)", statusLabel: "Public Demo"    },
 };
-
-type FieldMeta = ContextSources[keyof ContextSources];
-type SpecialFieldStatus = "live" | "cached" | "unavailable" | "fallback";
-
-/**
- * Classifies a field for wording purposes. "cached" is real data that isn't
- * confirmed-fresh this call — it must never read as "live" to a driver.
- * "fallback" covers both a genuine substitution (a real API call failed) and
- * a field with no real source integrated yet — those two cases share a
- * state in the data model and both render as "Demo Data" below, since
- * either way the number on screen did not come from a live provider call.
- */
-function classifySpecial(meta: FieldMeta): SpecialFieldStatus {
-  if (meta.state === "unavailable") return "unavailable";
-  if (meta.origin === "observed" || meta.origin === "estimated") {
-    return meta.state === "fresh" ? "live" : "cached";
-  }
-  return "fallback";
-}
-
-function providerLabel(provider: FieldMeta["provider"]): string | null {
-  if (!provider) return null;
-  return PROVIDER_LABELS[provider] ?? provider;
-}
-
-/** Whole minutes between an ISO timestamp and now; null if unparseable/absent/in the future (never shown as "-1 min old"). */
-function minutesAgo(observedAt: string | null, now: Date): number | null {
-  if (!observedAt) return null;
-  const ms = now.getTime() - new Date(observedAt).getTime();
-  if (!isFinite(ms) || ms < 0) return null;
-  return Math.round(ms / 60_000);
-}
-
-/**
- * One consistent phrase per field, covering all four states the same way
- * for every field — no field gets bespoke wording or generic-only grouping
- * (Phase 5: previously safetyEvents/weather/hos had individually tailored
- * sentences while speed/zoneRisk were only ever grouped generically, which
- * meant the two groups could describe an identically-shaped real/live
- * reading in different words). "Live"/"Cached" name the provider; "Cached"
- * additionally reports how old the reading is when that's computable.
- */
-function fieldStatusPhrase(label: string, meta: FieldMeta, now: Date): string {
-  const provider = providerLabel(meta.provider);
-  switch (classifySpecial(meta)) {
-    case "live":
-      return provider ? `${label}: Live (${provider}).` : `${label}: Live.`;
-    case "cached": {
-      const mins = minutesAgo(meta.observedAt, now);
-      const age = mins !== null ? `, ${mins} min old` : "";
-      return provider ? `${label}: Cached (${provider}${age}).` : `${label}: Cached${age ? ` (${mins} min old)` : ""}.`;
-    }
-    case "unavailable":
-      return `${label}: Unavailable.`;
-    case "fallback":
-      return `${label}: Demo Data.`;
-  }
-}
-
-const DISCLOSURE_FIELDS: { key: keyof ContextSources; label: string }[] = [
-  { key: "safetyEvents", label: "Safety events" },
-  { key: "hos",          label: "HOS" },
-  { key: "speed",        label: "Speed" },
-  { key: "weather",      label: "Weather" },
-];
-
-/**
- * Zone risk gets its own phrase instead of going through fieldStatusPhrase's
- * generic live/cached/unavailable/fallback classification. A pilot's zone
- * field is never "unavailable" merely because no curated zone matched a
- * valid GPS fix (see ZoneAvailability in lib/driverContext/types.ts) — that
- * distinction only exists on `zone` (ZoneDetail), not on the generic
- * ContextSources metadata, so it has to be read from `zone` directly. Demo
- * accounts (contextSources.zoneRisk classified as "fallback") keep the
- * existing "Demo Data" wording, unchanged.
- */
-function zoneStatusPhrase(meta: FieldMeta, zone: ZoneDetail | undefined, now: Date): string {
-  if (classifySpecial(meta) === "fallback") return fieldStatusPhrase("Zone risk", meta, now);
-  if (!zone) return fieldStatusPhrase("Zone risk", meta, now);
-
-  if (zone.availability === "matched") {
-    return zone.zoneName ? `Zone risk: Live (SafeHaul Zones) — ${zone.zoneName}.` : "Zone risk: Live (SafeHaul Zones).";
-  }
-  return `Zone risk: ${zone.explanation}.`;
-}
-
-/**
- * Builds the "what's live vs. cached vs. unavailable vs. demo" disclosure
- * shown for partial_live — generated entirely from contextSources (and,
- * for zone risk, the richer ZoneDetail), never hardcoded, so no field can
- * read more or less "live"/"available" than its actual backend state says
- * it is.
- */
-function buildPartialLiveDisclosure(sources: ContextSources, zone: ZoneDetail | undefined): string {
-  const now = new Date();
-  const phrases = DISCLOSURE_FIELDS.map(({ key, label }) => fieldStatusPhrase(label, sources[key], now));
-  phrases.push(zoneStatusPhrase(sources.zoneRisk, zone, now));
-  return phrases.join(" ");
-}
 
 /** "A, B and C" — small local join, same shape as the joinWithAnd() helper Phase 5 removed elsewhere, kept minimal since missingContext never exceeds 3 items (weather/zone/HOS). */
 function joinList(items: string[]): string {
@@ -256,8 +127,8 @@ function SkeletonBlock({ height, radius = 12 }: { height: number; radius?: numbe
 export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
   const telegramUser = useTelegram();
 
-  const [riskData,         setRiskData]         = useState<RiskResponse | null>(null);
-  const [location,         setLocation]         = useState<DriverLocation | null>(null);
+  const [riskData,         setRiskData]         = useState<RiskApiResponse | null>(null);
+  const [location,         setLocation]         = useState<LocationApiResponse | null>(null);
   const [loading,          setLoading]          = useState(true);
   const [error,            setError]            = useState<string | null>(null);
   const [driverId,         setDriverId]         = useState<string | null>(null);
@@ -295,7 +166,7 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
           fetch(`/api/location?driverId=${driver.id}`),
         ]);
         if (!riskRes.ok) throw new Error(`Risk API failed: ${riskRes.status}`);
-        const riskData: RiskResponse = await riskRes.json();
+        const riskData: RiskApiResponse = await riskRes.json();
 
         if (!cancelled) {
           setRiskData(riskData);
@@ -493,9 +364,22 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
                     </span>
                   )}
                 </div>
+                {/* Data completeness (N5, Phase 5, 2026-08-05) — a plain
+                    live/total count across all six tracked DriverContext
+                    fields (see lib/driverContext/contextStatus.ts's
+                    deriveDataCompleteness). Deliberately neutral wording:
+                    never "confidence"/"accuracy"/"reliability" — this
+                    describes how much of our tracked input is currently
+                    live, not how much to trust the score. Shown regardless
+                    of contextStatus (including demo, where it's honestly
+                    low), separate from and in addition to the existing
+                    per-field disclosure below, which it does not replace. */}
+                <div style={{ fontSize: 11.5, color: "var(--text-tertiary)", marginTop: 6 }}>
+                  Live inputs: {riskData.dataCompleteness.count} of {riskData.dataCompleteness.total}
+                </div>
                 {riskData.contextStatus === "partial_live" && (
                   <div style={{ fontSize: 11.5, color: "var(--text-tertiary)", marginTop: 8, lineHeight: 1.4 }}>
-                    {buildPartialLiveDisclosure(riskData.contextSources, riskData.zone)}
+                    {buildPartialLiveDisclosure(riskData.contextSources, riskData.zone, riskData.liveData)}
                     {/* Demo accounts only (dataSource "mock") — appended, never replacing the
                         per-field technical breakdown above. Real pilot drivers on a partial_live
                         connection (dataSource "real") see the breakdown exactly as before. */}

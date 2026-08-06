@@ -104,7 +104,7 @@ const HOS_FETCH_TIMEOUT_MS = 5_000;
 const LOCATION_FETCH_TIMEOUT_MS = 5_000;
 const WEATHER_FETCH_TIMEOUT_MS = 5_000;
 
-/** GPS reports every ~5-6s while a vehicle is online (verified live, 2026-07-22) — a reading past this age means the truck is very likely off/offline, not just "not yet polled." */
+/** GPS reports every ~5-6s while a vehicle is online (verified live, 2026-07-22) — a reading past this age means the truck is very likely off/offline, not just "not yet polled." See docs/data-freshness.md for how this compares to the other freshness thresholds in the codebase. */
 export const LOCATION_FRESH_THRESHOLD_MS = 10 * 60 * 1000;
 /** Beyond this, a position is no longer a meaningful proxy for "current" anything — treated the same as no reading at all. */
 export const LOCATION_STALE_THRESHOLD_MS = 6 * 60 * 60 * 1000;
@@ -146,6 +146,20 @@ export interface AssembleDriverContextResult {
   locationDetail: VehicleLocation;
   weatherDetail: WeatherDetail;
   zoneDetail: ZoneDetail;
+  /**
+   * The single instant this whole DriverContext was assembled at — the same
+   * `now` value already threaded through every field's `fetchedAt`/fallback
+   * `observedAt` below. Callers (e.g. /api/risk) should use this as their
+   * own "calculation timestamp" rather than independently calling `new
+   * Date()` a second time, so a response's top-level timestamp and its
+   * per-field `fetchedAt` values are guaranteed to agree — see N1 in the
+   * Phase 5 audit (2026-08-05) and docs/data-freshness.md. This is a
+   * SafeHaul calculation timestamp, never a provider event timestamp —
+   * those remain on their own fields (e.g. DriverEvent.timestamp,
+   * HosDetail.updatedAt, WeatherDetail.observedAt) and must never be
+   * conflated with this one.
+   */
+  calculatedAt: string;
 }
 
 /** Pure — labels a not-yet-integrated field: "fallback" for pilots (real source expected eventually), "fresh" for demo (intentional). */
@@ -865,5 +879,6 @@ export async function assembleDriverContext(
     locationDetail: locationResult.detail,
     weatherDetail: weatherResult.detail,
     zoneDetail: zoneRiskResult.detail,
+    calculatedAt: now,
   };
 }

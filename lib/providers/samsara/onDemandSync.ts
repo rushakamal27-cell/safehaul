@@ -71,7 +71,7 @@ import {
   type SamsaraSyncOutcome,
 } from "./syncSafetyEvents";
 
-const FRESHNESS_MS = 5 * 60 * 1000; // matches the product spec's staleness threshold
+const FRESHNESS_MS = 5 * 60 * 1000; // matches the product spec's staleness threshold — see docs/data-freshness.md for how this compares to the other freshness thresholds in the codebase
 const SYNC_TIMEOUT_MS = 6_000;
 const LOCK_STALE_MS = 20_000;
 
