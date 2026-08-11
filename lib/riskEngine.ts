@@ -170,6 +170,19 @@ function calcSafetyEventPenalties(
           rollingStop += ROLLING_STOP_WEIGHT * event.severity;
         }
         break;
+      // "crash" (2026-08-xx) is deliberately NOT scored here — a crash is
+      // an observed outcome, not (yet) treated as a predictive precursor
+      // the way harsh braking/speeding/etc. are. It is normalized and
+      // persisted as a DriverEvent (see lib/providers/samsara/normalizeEvent.ts)
+      // so it appears correctly in Audit/history, but this switch has no
+      // `default` case and `RiskInput.safetyEvents[].type` is a plain
+      // `string` (not the DriverEventType union), so an explicit no-op
+      // case isn't structurally required — it's written out anyway so
+      // this is a documented decision, not a silent gap. Revisit once
+      // there's a real product/data reason to weight it (e.g. correlating
+      // crash history with subsequent risk, which needs labeled outcome
+      // data SafeHaul doesn't have yet — see the Phase 5 audit's Item 5).
+      case "crash": break;
     }
   }
 

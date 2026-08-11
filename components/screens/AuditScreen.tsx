@@ -20,6 +20,11 @@ function getTimelineIcon(badgeType: AuditEvent["badgeType"], title: string) {
   if (lower.includes("login") || lower.includes("driver login")) return <LogIn {...props} />;
   if (lower.includes("compliance") || lower.includes("score"))   return <CheckCircle2 {...props} />;
   if (lower.includes("incident"))    return <AlertTriangle {...props} />;
+  // Crash (2026-08-xx): without this, a real Samsara Crash event's title
+  // ("Crash", via formatEventType) matches none of the branches below and
+  // falls through to the generic Circle icon — the exact "accidentally
+  // becomes an unknown/generic event" outcome this event type must avoid.
+  if (lower.includes("crash"))       return <AlertTriangle {...props} />;
   if (lower.includes("mobile") || lower.includes("braking") || lower.includes("usage") || lower.includes("harsh") || lower.includes("inattentive")) {
     return <Zap {...props} />;
   }

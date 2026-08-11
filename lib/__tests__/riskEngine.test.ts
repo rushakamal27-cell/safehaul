@@ -478,3 +478,66 @@ describe("calculateRisk — Phase 6A: BEHAVIOR_RELEVANT_EVENT_TYPES membership",
     assert.ok(withFollowingDistance.score < withRollingStop.score);
   });
 });
+
+// ---------------------------------------------------------------------------
+// "crash" (2026-08-xx) — a real Samsara Crash event (2026-08-07, pilot
+// driver Rushana) was fetched and stored but silently dropped at
+// normalization because SAMSARA_TYPE_MAP had no entry for it (see
+// lib/providers/samsara/__tests__/normalizeStreamEvent.test.ts for that
+// fix). This section proves the OTHER half of the fix: now that "crash"
+// normalizes and persists as a DriverEvent, it must NOT start silently
+// contributing to the predictive risk score — a crash is an observed
+// outcome, not (yet) a scored precursor. calcSafetyEventPenalties's switch
+// has an explicit no-op `case "crash": break;` (see riskEngine.ts) rather
+// than relying on the absence of a case, specifically so this is a
+// documented decision, not an accidental gap — these tests pin that
+// decision down as a regression guard.
+// ---------------------------------------------------------------------------
+
+describe("calculateRisk — 'crash' is persisted-safe but intentionally unscored", () => {
+  const low = { weatherRisk: 0, zoneRisk: 0, hosHours: 4, speed: 0 };
+
+  test("a lone crash event does not change the score at all, at any severity", () => {
+    for (const severity of [1, 2, 3, 4, 5]) {
+      const result = calculateRisk({ ...low, safetyEvents: [{ type: "crash", severity }] });
+      assert.equal(result.score, 100, `severity ${severity} must not affect the score`);
+    }
+  });
+
+  test("a crash event never appears in result.factors — there is no scored bucket for it", () => {
+    const result = calculateRisk({ ...low, safetyEvents: [{ type: "crash", severity: 5 }] });
+    assert.deepEqual(result.factors, []);
+  });
+
+  test("multiple crash events (even many) still contribute nothing — no cap needed because there is nothing to accumulate", () => {
+    const events = Array.from({ length: 10 }, () => ({ type: "crash", severity: 5 }));
+    const result = calculateRisk({ ...low, safetyEvents: events });
+    assert.equal(result.score, 100);
+  });
+
+  test("crash does not amplify Contextual Speed — not a member of BEHAVIOR_RELEVANT_EVENT_TYPES", () => {
+    const withSpeed = { weatherRisk: 0, zoneRisk: 0, hosHours: 4, speed: 65 };
+    const baseline = calculateRisk({ ...withSpeed, safetyEvents: [] }).contextualSpeed;
+    const withCrash = calculateRisk({ ...withSpeed, safetyEvents: [{ type: "crash", severity: 5 }] }).contextualSpeed;
+    assert.equal(withCrash.multiplier, baseline.multiplier);
+    assert.equal(withCrash.finalPenalty, baseline.finalPenalty);
+  });
+
+  test("a crash alongside other real safety events: only the other events score, crash contributes exactly zero (no interference either direction)", () => {
+    const withoutCrash = calculateRisk({
+      ...low,
+      safetyEvents: [{ type: "harsh_braking", severity: 3 }],
+    });
+    const withCrash = calculateRisk({
+      ...low,
+      safetyEvents: [{ type: "harsh_braking", severity: 3 }, { type: "crash", severity: 5 }],
+    });
+    assert.equal(withCrash.score, withoutCrash.score);
+    assert.deepEqual(withCrash.factors, withoutCrash.factors);
+  });
+
+  test("no recommendation is triggered by a crash event alone (no existing recommendation condition reads a crash-specific penalty, since none exists)", () => {
+    const result = calculateRisk({ ...low, safetyEvents: [{ type: "crash", severity: 5 }] });
+    assert.deepEqual(result.recommendations, []);
+  });
+});

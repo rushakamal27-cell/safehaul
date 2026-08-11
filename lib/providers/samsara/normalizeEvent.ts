@@ -30,7 +30,8 @@ export type DriverEventType =
   | "speeding"
   | "rolling_stop"
   | "following_distance"
-  | "forward_collision_warning";
+  | "forward_collision_warning"
+  | "crash";
 
 /** Provider-neutral normalized event ready for DriverEvent persistence. */
 export interface NormalizedProviderEvent {
@@ -102,6 +103,17 @@ export const SAMSARA_TYPE_MAP: Readonly<Record<string, DriverEventType>> = {
   followingDistance:       "following_distance",
   ForwardCollisionWarning: "forward_collision_warning",
   forwardCollisionWarning: "forward_collision_warning",
+  // Confirmed live 2026-08-09 against a real pilot org event (Rushana,
+  // 2026-08-07): a stored RawProviderEvent with behaviorLabels:
+  // [{ label: "Crash", source: "SYSTEM" }] had no case here, so
+  // normalizeSafetyStreamEvent correctly-but-silently skipped it
+  // (skipReason "unsupported_behavior_label") — the raw payload was
+  // preserved, but no DriverEvent was ever created. See
+  // lib/riskEngine.ts's calcSafetyEventPenalties for why "crash" is
+  // deliberately NOT scored (no case there either, by design — a crash is
+  // an observed outcome, not treated as a predictive precursor yet).
+  Crash:                   "crash",
+  crash:                   "crash",
 };
 
 // ---------------------------------------------------------------------------
