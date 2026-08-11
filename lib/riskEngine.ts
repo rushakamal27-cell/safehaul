@@ -79,14 +79,75 @@ export interface RiskOutput {
 // Penalty calculators
 // ---------------------------------------------------------------------------
 
+/**
+ * Phase 6A (2026-08-xx) — following_distance and rolling_stop weights.
+ * Both set to 1.5, tied with the lowest existing tier (harsh_accel/
+ * harsh_turn), deliberately conservative: as of this phase, EVERY real
+ * event of either type ever observed for this fleet (9 following_distance,
+ * 2 rolling_stop) arrived with no Samsara-reported severity at all and
+ * normalized to the fallback value of 3 — there is no real severity
+ * differentiation signal yet, and the sample size is thin. See the Phase
+ * 6A plan (2026-08-xx) for the calibration reasoning and simulated
+ * before/after scores this was chosen against.
+ */
+const FOLLOWING_DISTANCE_WEIGHT = 1.5;
+const ROLLING_STOP_WEIGHT = 1.5;
+
+/**
+ * TEMPORARY pilot safeguard (Phase 6A, 2026-08-xx) — NOT a statistically
+ * validated threshold. Caps how many following_distance / rolling_stop
+ * events can contribute to THIS SCORE CALCULATION within one call's event
+ * window; the 4th+ occurrence of either type in the same call still counts
+ * toward every other purpose (RawProviderEvent/DriverEvent storage, the
+ * Audit trail, liveData.driverEventCount24h) — only the scoring
+ * contribution stops growing.
+ *
+ * Chosen as the exact ceiling of the largest real same-day cluster
+ * observed to date (following_distance: 3 events for one driver on
+ * 2026-07-24) — a forward-looking guard against unbounded accumulation
+ * from a single sustained condition (e.g. stuck behind traffic on a long
+ * highway stretch re-triggering the same underlying event), not a clip on
+ * anything actually seen. rolling_stop has never clustered in real data
+ * (2 total events, ever, on different days for different drivers) but is
+ * capped identically for consistency and because a discrete violation type
+ * could in principle still repeat rapidly (e.g. a residential route with
+ * several closely-spaced stop signs) — this errs conservative rather than
+ * leaving one of the two new, low-confidence signals unbounded while the
+ * other is bounded. Revisit (raise, lower, remove, or replace with a real
+ * statistical treatment) once meaningfully more real data accumulates for
+ * both types — this is explicitly a pilot-stage placeholder, not a
+ * permanent design decision.
+ */
+const FOLLOWING_DISTANCE_MAX_COUNTED = 3;
+const ROLLING_STOP_MAX_COUNTED = 3;
+
 function calcSafetyEventPenalties(
   events: RiskInput["safetyEvents"]
-): { harshBraking: number; speeding: number; harshManeuver: number; distraction: number; mechanical: number } {
-  let harshBraking  = 0;
-  let speeding      = 0;
-  let harshManeuver = 0;
-  let distraction   = 0;
-  let mechanical    = 0;
+): {
+  harshBraking: number;
+  speeding: number;
+  harshManeuver: number;
+  distraction: number;
+  mechanical: number;
+  followingDistance: number;
+  rollingStop: number;
+} {
+  let harshBraking       = 0;
+  let speeding           = 0;
+  let harshManeuver      = 0;
+  let distraction        = 0;
+  let mechanical         = 0;
+  let followingDistance  = 0;
+  let rollingStop        = 0;
+
+  // Counters for the temporary per-type caps above — count EVERY occurrence
+  // (so the cap comparison is correct) even though only the first
+  // FOLLOWING_DISTANCE_MAX_COUNTED / ROLLING_STOP_MAX_COUNTED add to the
+  // penalty sum. Local to one calcSafetyEventPenalties call, matching the
+  // existing 24-hour event window (lib/driverEvents.ts::getRecentDriverEvents)
+  // — never persisted, never affects storage or counts shown elsewhere.
+  let followingDistanceCount = 0;
+  let rollingStopCount       = 0;
 
   for (const event of events) {
     switch (event.type) {
@@ -97,10 +158,22 @@ function calcSafetyEventPenalties(
       case "mobile_usage":           distraction   += 3   * event.severity; break;
       case "inattentive_driving":    distraction   += 2.5 * event.severity; break;
       case "high_speed_power_loss":  mechanical    += 4   * event.severity; break;
+      case "following_distance":
+        followingDistanceCount++;
+        if (followingDistanceCount <= FOLLOWING_DISTANCE_MAX_COUNTED) {
+          followingDistance += FOLLOWING_DISTANCE_WEIGHT * event.severity;
+        }
+        break;
+      case "rolling_stop":
+        rollingStopCount++;
+        if (rollingStopCount <= ROLLING_STOP_MAX_COUNTED) {
+          rollingStop += ROLLING_STOP_WEIGHT * event.severity;
+        }
+        break;
     }
   }
 
-  return { harshBraking, speeding, harshManeuver, distraction, mechanical };
+  return { harshBraking, speeding, harshManeuver, distraction, mechanical, followingDistance, rollingStop };
 }
 
 function calcFatiguePenalty(hosHours: number | null): number {
@@ -314,12 +387,23 @@ const MULTIPLIER_CAP = 2.5;
  * independent of current speed (they can happen at any speed), so they
  * remain eligible to amplify speedExposure without re-charging the same
  * measurement.
+ *
+ * Phase 6A (2026-08-xx) adds "following_distance": tailgating can happen at
+ * any speed (even in stop-and-go traffic), but is categorically more
+ * dangerous at highway speed — the same "independent of current speed, but
+ * compounds with it" shape as the four types already here. Deliberately
+ * does NOT add "rolling_stop": a rolling stop is inherently a low-speed-
+ * context event (approaching/departing a stop-controlled point), so it
+ * doesn't have the "more dangerous when combined with high concurrent
+ * speed" story that justifies inclusion here — see the Phase 6A plan
+ * (2026-08-xx) for the full reasoning.
  */
 const BEHAVIOR_RELEVANT_EVENT_TYPES = new Set([
   "mobile_usage",
   "inattentive_driving",
   "harsh_braking",
   "harsh_turn",
+  "following_distance",
 ]);
 
 function calculateWeatherSpeedModifier(weatherRisk: number, weatherAvailable: boolean): number {
@@ -405,14 +489,16 @@ function buildFactors(displayPenalties: Record<string, number>): RiskFactor[] {
   if (totalPenalty === 0) return [];
 
   const labelMap: Record<string, string> = {
-    harshBraking:  "Harsh Braking",
-    speeding:      "Speeding",
-    harshManeuver: "Harsh Maneuver",
-    distraction:   "Distracted Driving",
-    mechanical:    "Mechanical Risk",
-    fatigue:       "Fatigue",
-    weather:       "Weather",
-    zone:          "Zone Risk",
+    harshBraking:      "Harsh Braking",
+    speeding:          "Speeding",
+    harshManeuver:     "Harsh Maneuver",
+    distraction:       "Distracted Driving",
+    mechanical:        "Mechanical Risk",
+    fatigue:           "Fatigue",
+    weather:           "Weather",
+    zone:              "Zone Risk",
+    followingDistance: "Following Distance",
+    rollingStop:       "Rolling Stop",
   };
 
   // Compute exact float percentages, keep only non-zero entries
@@ -455,7 +541,11 @@ function buildRecommendations(
     recs.push("Use extra caution due to current weather conditions.");
   }
 
-  const speedingPenalty = penalties.speeding + penalties.speed;
+  // followingDistance included here (Phase 6A) rather than as a separate
+  // recommendation string — this message already promises to cover safe
+  // following distance, it just wasn't wired to a real following-distance
+  // signal until now.
+  const speedingPenalty = penalties.speeding + penalties.speed + penalties.followingDistance;
   if (speedingPenalty > 0) {
     recs.push("Reduce speed and maintain a safe following distance.");
   }
@@ -480,6 +570,14 @@ function buildRecommendations(
     recs.push("High-speed power loss detected — pull over safely and inspect the vehicle.");
   }
 
+  // Phase 6A — no existing recommendation fits a stop-sign/red-light
+  // violation; this string is matched by lib/recommendationDisplay.ts's
+  // classifyRecommendation as "Traffic Control", checked before the
+  // generic brake/stop branch that would otherwise shadow it.
+  if (penalties.rollingStop > 0) {
+    recs.push("Come to a complete stop at stop signs and red lights.");
+  }
+
   return recs;
 }
 
@@ -488,7 +586,7 @@ function buildRecommendations(
 // ---------------------------------------------------------------------------
 
 export function calculateRisk(input: RiskInput): RiskOutput {
-  const { harshBraking, speeding, harshManeuver, distraction, mechanical } =
+  const { harshBraking, speeding, harshManeuver, distraction, mechanical, followingDistance, rollingStop } =
     calcSafetyEventPenalties(input.safetyEvents);
   const fatigue = calcFatiguePenalty(input.hosHours);
   const weather = calcWeatherPenalty(input.weatherRisk);
@@ -508,9 +606,16 @@ export function calculateRisk(input: RiskInput): RiskOutput {
     weather,
     zone,
     speed,
+    followingDistance,
+    rollingStop,
   };
 
-  // Display penalties — speeding event + excess speed merged into one "speeding" factor
+  // Display penalties — speeding event + excess speed merged into one
+  // "speeding" factor. followingDistance/rollingStop (Phase 6A) get their
+  // own bars rather than being merged into an existing bucket — they're
+  // distinct hazard categories (close-following risk / intersection
+  // compliance), and folding them into "Speeding" or "Harsh Maneuver" would
+  // misattribute the cause a driver/reviewer sees in the breakdown.
   const displayPenalties: Record<string, number> = {
     harshBraking,
     speeding: speeding + speed,
@@ -520,6 +625,8 @@ export function calculateRisk(input: RiskInput): RiskOutput {
     fatigue,
     weather,
     zone,
+    followingDistance,
+    rollingStop,
   };
 
   const totalPenalty = Object.values(rawPenalties).reduce((sum, v) => sum + v, 0);

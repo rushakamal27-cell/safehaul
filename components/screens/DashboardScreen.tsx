@@ -11,6 +11,10 @@ import {
   buildPartialLiveDisclosure,
 } from "@/lib/dashboardDisclosure";
 import {
+  classifyRecommendation,
+  type RecommendationCategory,
+} from "@/lib/recommendationDisplay";
+import {
   Cloud, Moon, Gauge, MapPin, Smartphone, AlertTriangle,
   Wrench, Info, ChevronRight, TriangleAlert,
 } from "lucide-react";
@@ -82,37 +86,30 @@ function getGreeting(): string {
 // Map a recommendation string → icon + title
 const ICON_PROPS = { size: 16, strokeWidth: 1.75 };
 
+// Maps each classifyRecommendation() category to its display icon — the
+// only reason parseRecommendation still lives in this component file
+// rather than fully in lib/recommendationDisplay.ts (which stays free of
+// JSX/React so it can be unit-tested without a component test harness).
+const RECOMMENDATION_ICONS: Record<RecommendationCategory, React.ReactNode> = {
+  fatigue:        <Moon {...ICON_PROPS} />,
+  weather:        <Cloud {...ICON_PROPS} />,
+  speed:          <Gauge {...ICON_PROPS} />,
+  zoneAlert:      <MapPin {...ICON_PROPS} />,
+  distraction:    <Smartphone {...ICON_PROPS} />,
+  trafficControl: <AlertTriangle {...ICON_PROPS} />,
+  braking:        <AlertTriangle {...ICON_PROPS} />,
+  vehicle:        <Wrench {...ICON_PROPS} />,
+  drivingStyle:   <Gauge {...ICON_PROPS} />,
+  advisory:       <Info {...ICON_PROPS} />,
+};
+
 function parseRecommendation(rec: string): {
   icon: React.ReactNode;
   title: string;
   description: string;
 } {
-  const lower = rec.toLowerCase();
-  if (lower.includes("rest") || lower.includes("break") || lower.includes("fatigue")) {
-    return { icon: <Moon {...ICON_PROPS} />, title: "Fatigue", description: rec };
-  }
-  if (lower.includes("weather") || lower.includes("caution") || lower.includes("condition")) {
-    return { icon: <Cloud {...ICON_PROPS} />, title: "Weather", description: rec };
-  }
-  if (lower.includes("speed") || lower.includes("following distance")) {
-    return { icon: <Gauge {...ICON_PROPS} />, title: "Speed", description: rec };
-  }
-  if (lower.includes("zone") || lower.includes("area")) {
-    return { icon: <MapPin {...ICON_PROPS} />, title: "Zone Alert", description: rec };
-  }
-  if (lower.includes("phone") || lower.includes("distract")) {
-    return { icon: <Smartphone {...ICON_PROPS} />, title: "Distraction", description: rec };
-  }
-  if (lower.includes("brake") || lower.includes("stop")) {
-    return { icon: <AlertTriangle {...ICON_PROPS} />, title: "Braking", description: rec };
-  }
-  if (lower.includes("pull over") || lower.includes("power loss") || lower.includes("inspect")) {
-    return { icon: <Wrench {...ICON_PROPS} />, title: "Vehicle", description: rec };
-  }
-  if (lower.includes("smooth") || lower.includes("accel") || lower.includes("maneuver")) {
-    return { icon: <Gauge {...ICON_PROPS} />, title: "Driving Style", description: rec };
-  }
-  return { icon: <Info {...ICON_PROPS} />, title: "Advisory", description: rec };
+  const { category, title } = classifyRecommendation(rec);
+  return { icon: RECOMMENDATION_ICONS[category], title, description: rec };
 }
 
 // ── Skeleton loading block ─────────────────────────────────────────────────────

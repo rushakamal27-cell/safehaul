@@ -317,3 +317,164 @@ describe("calculateRisk — Contextual Speed (continuous exposure)", () => {
     assert.equal(behaviorComponent.included, true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 6A (2026-08-xx) — following_distance / rolling_stop scoring.
+//
+// Both event types were already flowing through real ingestion (9 real
+// following_distance, 2 real rolling_stop events for the pilot fleet) but
+// had no case in calcSafetyEventPenalties — they were stored and visible
+// in the Audit trail but contributed zero to the score. This section pins
+// down: weight (1.5 each, tied with the lowest existing tier), the
+// temporary 3-event pilot-safeguard cap (identical for both types, NOT a
+// statistically validated threshold — see the constant's own doc comment
+// in riskEngine.ts), following_distance's (but not rolling_stop's)
+// membership in BEHAVIOR_RELEVANT_EVENT_TYPES, factor labels, and
+// recommendation triggers.
+//
+// `low` fixture speed:0 keeps Contextual Speed's finalPenalty at exactly 0
+// (see "1. zero speed produces zero exposure" above), which isolates the
+// direct calcSafetyEventPenalties contribution for clean, hand-verifiable
+// arithmetic in the weight/cap tests below. A separate describe block
+// further down uses a nonzero speed specifically to demonstrate the
+// BEHAVIOR_RELEVANT_EVENT_TYPES amplification difference between the two
+// types, which speed:0 would otherwise hide (0 exposure × any multiplier
+// is still 0).
+// ---------------------------------------------------------------------------
+
+describe("calculateRisk — Phase 6A: following_distance / rolling_stop weight + cap", () => {
+  const low = { weatherRisk: 0, zoneRisk: 0, hosHours: 4, speed: 0 };
+
+  function eventsOf(type: string, count: number, severity = 3) {
+    return Array.from({ length: count }, () => ({ type, severity }));
+  }
+
+  describe("following_distance", () => {
+    test("1 event (severity 3): penalty = 1.5 * 3 = 4.5, score 96", () => {
+      const result = calculateRisk({ ...low, safetyEvents: eventsOf("following_distance", 1) });
+      assert.equal(result.score, 96);
+      assert.deepEqual(result.factors, [{ name: "Following Distance", impact: 100 }]);
+    });
+
+    test("2 events: penalty = 2 * 4.5 = 9, score 91", () => {
+      const result = calculateRisk({ ...low, safetyEvents: eventsOf("following_distance", 2) });
+      assert.equal(result.score, 91);
+    });
+
+    test("3 events (at the cap): penalty = 3 * 4.5 = 13.5, score 87", () => {
+      const result = calculateRisk({ ...low, safetyEvents: eventsOf("following_distance", 3) });
+      assert.equal(result.score, 87);
+    });
+
+    test("4 events (over the cap): score UNCHANGED from 3 — the 4th event adds nothing to the score", () => {
+      const at3 = calculateRisk({ ...low, safetyEvents: eventsOf("following_distance", 3) });
+      const at4 = calculateRisk({ ...low, safetyEvents: eventsOf("following_distance", 4) });
+      assert.equal(at4.score, at3.score);
+      assert.equal(at4.score, 87);
+    });
+
+    test("10 events: still capped at exactly the 3-event penalty, never grows further", () => {
+      const at3 = calculateRisk({ ...low, safetyEvents: eventsOf("following_distance", 3) });
+      const at10 = calculateRisk({ ...low, safetyEvents: eventsOf("following_distance", 10) });
+      assert.equal(at10.score, at3.score);
+    });
+
+    test("triggers the (existing, reused) following-distance recommendation and no other new one", () => {
+      const result = calculateRisk({ ...low, safetyEvents: eventsOf("following_distance", 1) });
+      assert.ok(result.recommendations.includes("Reduce speed and maintain a safe following distance."));
+      assert.ok(!result.recommendations.includes("Come to a complete stop at stop signs and red lights."));
+    });
+  });
+
+  describe("rolling_stop", () => {
+    test("1 event (severity 3): penalty = 1.5 * 3 = 4.5, score 96", () => {
+      const result = calculateRisk({ ...low, safetyEvents: eventsOf("rolling_stop", 1) });
+      assert.equal(result.score, 96);
+      assert.deepEqual(result.factors, [{ name: "Rolling Stop", impact: 100 }]);
+    });
+
+    test("2 events: penalty = 2 * 4.5 = 9, score 91", () => {
+      const result = calculateRisk({ ...low, safetyEvents: eventsOf("rolling_stop", 2) });
+      assert.equal(result.score, 91);
+    });
+
+    test("3 events (at the cap): penalty = 3 * 4.5 = 13.5, score 87", () => {
+      const result = calculateRisk({ ...low, safetyEvents: eventsOf("rolling_stop", 3) });
+      assert.equal(result.score, 87);
+    });
+
+    test("4 events (over the cap): score UNCHANGED from 3 — the temporary pilot-safeguard cap applies identically to rolling_stop", () => {
+      const at3 = calculateRisk({ ...low, safetyEvents: eventsOf("rolling_stop", 3) });
+      const at4 = calculateRisk({ ...low, safetyEvents: eventsOf("rolling_stop", 4) });
+      assert.equal(at4.score, at3.score);
+      assert.equal(at4.score, 87);
+    });
+
+    test("10 events: still capped at exactly the 3-event penalty", () => {
+      const at3 = calculateRisk({ ...low, safetyEvents: eventsOf("rolling_stop", 3) });
+      const at10 = calculateRisk({ ...low, safetyEvents: eventsOf("rolling_stop", 10) });
+      assert.equal(at10.score, at3.score);
+    });
+
+    test("triggers the new Traffic Control recommendation and no other new one", () => {
+      const result = calculateRisk({ ...low, safetyEvents: eventsOf("rolling_stop", 1) });
+      assert.ok(result.recommendations.includes("Come to a complete stop at stop signs and red lights."));
+      assert.ok(!result.recommendations.includes("Reduce speed and maintain a safe following distance."));
+    });
+  });
+
+  test("the two caps are independent — 3 of each simultaneously still scores as the sum of both individual 3-event penalties", () => {
+    const result = calculateRisk({
+      ...low,
+      safetyEvents: [...eventsOf("following_distance", 5), ...eventsOf("rolling_stop", 5)],
+    });
+    // 13.5 (following_distance, capped at 3) + 13.5 (rolling_stop, capped at 3) = 27
+    assert.equal(result.score, 73);
+    assert.ok(result.factors.some((f) => f.name === "Following Distance"));
+    assert.ok(result.factors.some((f) => f.name === "Rolling Stop"));
+  });
+
+  test("cap is purely a scoring concept — calculateRisk never mutates or drops events from its input (storage/Audit-trail/event-count are populated upstream from the same unmodified array, never from this engine)", () => {
+    const events = eventsOf("following_distance", 5);
+    const snapshotLength = events.length;
+    calculateRisk({ ...low, safetyEvents: events });
+    assert.equal(events.length, snapshotLength, "calculateRisk must not mutate the input events array");
+  });
+
+  test("existing event types are completely unaffected by this phase (harsh_braking weight/behavior unchanged)", () => {
+    const result = calculateRisk({ ...low, safetyEvents: [{ type: "harsh_braking", severity: 3 }] });
+    assert.equal(result.score, 94); // 2 * 3 = 6 penalty, unchanged from before this phase
+    assert.deepEqual(result.factors, [{ name: "Harsh Braking", impact: 100 }]);
+  });
+});
+
+describe("calculateRisk — Phase 6A: BEHAVIOR_RELEVANT_EVENT_TYPES membership", () => {
+  const low = { weatherRisk: 0, zoneRisk: 0, hosHours: 4, speed: 65 };
+
+  test("following_distance amplifies Contextual Speed (included in BEHAVIOR_RELEVANT_EVENT_TYPES)", () => {
+    const baseline = calculateRisk({ ...low, safetyEvents: [] }).contextualSpeed;
+    const withEvent = calculateRisk({ ...low, safetyEvents: [{ type: "following_distance", severity: 3 }] }).contextualSpeed;
+    assert.equal(baseline.multiplier, 1);
+    assert.ok(withEvent.multiplier > 1, "following_distance must amplify the Contextual Speed multiplier");
+    const behaviorComponent = withEvent.components.find((c) => c.key === "behavior")!;
+    assert.ok(behaviorComponent.modifier > 0);
+  });
+
+  test("rolling_stop does NOT amplify Contextual Speed (excluded from BEHAVIOR_RELEVANT_EVENT_TYPES)", () => {
+    const baseline = calculateRisk({ ...low, safetyEvents: [] }).contextualSpeed;
+    const withEvent = calculateRisk({ ...low, safetyEvents: [{ type: "rolling_stop", severity: 3 }] }).contextualSpeed;
+    assert.equal(withEvent.multiplier, baseline.multiplier);
+    const behaviorComponent = withEvent.components.find((c) => c.key === "behavior")!;
+    assert.equal(behaviorComponent.modifier, 0);
+  });
+
+  test("at otherwise-identical inputs, a following_distance event produces a strictly lower score than an equivalent rolling_stop event, due solely to the Contextual Speed amplification difference", () => {
+    const withFollowingDistance = calculateRisk({ ...low, safetyEvents: [{ type: "following_distance", severity: 3 }] });
+    const withRollingStop = calculateRisk({ ...low, safetyEvents: [{ type: "rolling_stop", severity: 3 }] });
+    // Both have an identical direct penalty (1.5 * 3 = 4.5) — the only
+    // difference is following_distance's extra Contextual Speed contribution.
+    assert.equal(withFollowingDistance.score, 91);
+    assert.equal(withRollingStop.score, 92);
+    assert.ok(withFollowingDistance.score < withRollingStop.score);
+  });
+});
