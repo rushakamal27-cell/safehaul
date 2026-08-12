@@ -250,8 +250,12 @@ async function assembleSafetyEvents(
  * must not be disguised as a mock number. shiftHoursUsed feeds the risk
  * engine (DriverContext.hos.value); the rest of the breakdown is
  * transparency-only (see HosDetail in ./types.ts).
+ *
+ * Exported (Phase 6B.2) so lib/driverContext/captureObservation.ts can reuse
+ * this same logic instead of re-implementing an HOS fetch — behavior is
+ * otherwise unchanged from when this was module-private.
  */
-async function assembleHos(
+export async function assembleHos(
   driverId: string,
   isPilot: boolean,
   now: string
