@@ -114,6 +114,12 @@ import {
   type StreamSkipReason,
 } from "@/lib/providers/samsara/normalizeStreamEvent";
 import { syncProviderDriverName } from "@/lib/driverIdentity";
+import {
+  enrichNewDriverEvents,
+  type EnrichmentStats,
+  type EnrichNewDriverEventsDeps,
+  type NewDriverEventRef,
+} from "@/lib/driverContext/eventEnrichment";
 
 export const PROVIDER = "samsara" as const;
 export const STREAM_KEY = "safety-events" as const;
@@ -130,6 +136,14 @@ export interface SamsaraSyncStats {
   unsupportedLabelsFound: Record<string, number>;
   duplicates: number;
   driverEventsCreated: number;
+  /**
+   * IDs of DriverEvent rows genuinely created THIS run — never duplicates,
+   * already-normalized events, unsupported-label skips, or previously
+   * existing rows (Phase 6B.4). This is what enrichment (below) iterates
+   * over; it is also exposed here as a stat in its own right so any other
+   * caller can know what was newly ingested without re-deriving it.
+   */
+  newDriverEventIds: string[];
 }
 
 const emptyStats = (): SamsaraSyncStats => ({
@@ -145,11 +159,12 @@ const emptyStats = (): SamsaraSyncStats => ({
   unsupportedLabelsFound: {},
   duplicates: 0,
   driverEventsCreated: 0,
+  newDriverEventIds: [],
 });
 
 export type SamsaraSyncOutcome =
   | ({ synced: true; skipped: true; reason: "no_pilot_drivers"; elapsedMs: number })
-  | ({ synced: true; skipped: false; cursor?: string; elapsedMs: number } & SamsaraSyncStats)
+  | ({ synced: true; skipped: false; cursor?: string; elapsedMs: number; enrichment: EnrichmentStats } & SamsaraSyncStats)
   | ({ synced: false; error: string; elapsedMs: number } & SamsaraSyncStats);
 
 /** Pure — now - COLD_START_HOURS, as an ISO 8601 string. */
@@ -252,6 +267,8 @@ export interface RunSyncDeps {
   mappingClient?: PilotMappingClient;
   /** Injectable for tests; defaults to prisma.providerSyncState. */
   syncStateClient?: SafetyEventsSyncStateClient;
+  /** Injectable for tests (Phase 6B.4); passed through to enrichNewDriverEvents. */
+  enrichmentDeps?: EnrichNewDriverEventsDeps;
 }
 
 /**
@@ -259,8 +276,18 @@ export interface RunSyncDeps {
  * supported/mapped events) create a DriverEvent. Mutates `stats` in place.
  * Unchanged by the pagination/cursor-pairing fixes — extracted only so the
  * attempt/retry control flow around it stays readable.
+ *
+ * `newDriverEvents` (Phase 6B.4) is a second, separate mutable accumulator
+ * — {id, driverId} pairs for every DriverEvent genuinely created THIS run,
+ * kept apart from `stats.newDriverEventIds` (plain string IDs, the public
+ * stat) because enrichment needs driverId too and that has no business
+ * being on the public stats shape.
  */
-async function processPage(page: SamsaraSafetyStreamResponse, stats: SamsaraSyncStats): Promise<void> {
+async function processPage(
+  page: SamsaraSafetyStreamResponse,
+  stats: SamsaraSyncStats,
+  newDriverEvents: NewDriverEventRef[]
+): Promise<void> {
   for (const rawEvent of page.data) {
     stats.eventsProcessed++;
 
@@ -395,7 +422,7 @@ async function processPage(page: SamsaraSafetyStreamResponse, stats: SamsaraSync
         continue;
       }
 
-      await prisma.driverEvent.create({
+      const createdEvent = await prisma.driverEvent.create({
         data: {
           driverId:           mapping.driverId,
           rawProviderEventId,
@@ -408,9 +435,12 @@ async function processPage(page: SamsaraSafetyStreamResponse, stats: SamsaraSync
           lat:                normalized.event.lat ?? null,
           lng:                normalized.event.lng ?? null,
         },
+        select: { id: true },
       });
 
       stats.driverEventsCreated++;
+      stats.newDriverEventIds.push(createdEvent.id);
+      newDriverEvents.push({ id: createdEvent.id, driverId: mapping.driverId });
     } catch (err) {
       // Per-event error: log and continue — do not fail the whole sync run
       console.error(
@@ -522,6 +552,12 @@ export async function runSamsaraSafetyEventsSync(
 
   // ── Step 3: Drain pages, with one same-call retry on a genuine cursor error ──
   const stats = emptyStats();
+  // Phase 6B.4 — {id, driverId} pairs for every DriverEvent genuinely
+  // created across this whole call (all attempts, including a partially
+  // successful attempt that was later retried after a cursor error — those
+  // pages' DriverEvents are still real, committed rows and must still be
+  // enriched). Declared once outside the attempt loop, same as `stats`.
+  const newDriverEvents: NewDriverEventRef[] = [];
   let lastError: unknown = null;
 
   for (let attempt = 1; attempt <= MAX_SYNC_ATTEMPTS; attempt++) {
@@ -567,7 +603,7 @@ export async function runSamsaraSafetyEventsSync(
         currentCursor = page.pagination.endCursor;
 
         // 3b. Process each event on this page (unchanged logic)
-        await processPage(page, stats);
+        await processPage(page, stats, newDriverEvents);
 
         // 3c. Persist cursor + its paired startTime together, after each
         // page — safe checkpoint. The pair can never disagree because both
@@ -606,13 +642,37 @@ export async function runSamsaraSafetyEventsSync(
         data: { lastSyncAt: new Date() },
       });
 
+      // Safety Events ingestion is already fully successful at this point —
+      // everything below is best-effort enrichment layered ON TOP of that
+      // success, never a precondition for it (Phase 6B.4, Requirement 1).
+      // enrichNewDriverEvents never throws on a per-event basis, but this is
+      // guarded anyway so a genuinely unexpected failure in the batch itself
+      // (not an individual event) can never revert `synced: true` below.
+      const enrichment = await enrichNewDriverEvents(newDriverEvents, deps.enrichmentDeps).catch(
+        (err: unknown): EnrichmentStats => {
+          console.error("[sync/samsara] Enrichment batch failed unexpectedly:", err);
+          return {
+            eventsCreated: newDriverEvents.length,
+            enrichmentAttempted: 0,
+            enrichmentCreated: 0,
+            enrichmentSkipped: 0,
+            enrichmentFailed: newDriverEvents.length,
+          };
+        }
+      );
+
       const outcome: SamsaraSyncOutcome = {
         synced: true,
         skipped: false,
         cursor: lastCursor,
         elapsedMs: Date.now() - startedAt,
         ...stats,
+        enrichment,
       };
+      // Ingestion success (synced: true) is independent of enrichment
+      // outcome — a nonzero enrichmentFailed here does NOT mean the sync
+      // itself failed; see Requirement 8. Logged together only for
+      // operational convenience (one line to grep per sync run).
       console.info(JSON.stringify({ msg: "sync_complete", ...outcome, attempt }));
       return outcome;
     } catch (err) {

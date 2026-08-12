@@ -76,6 +76,15 @@ const emptyStats: SamsaraSyncStats = {
   unsupportedLabelsFound: {},
   duplicates: 0,
   driverEventsCreated: 0,
+  newDriverEventIds: [],
+};
+
+const emptyEnrichment = {
+  eventsCreated: 0,
+  enrichmentAttempted: 0,
+  enrichmentCreated: 0,
+  enrichmentSkipped: 0,
+  enrichmentFailed: 0,
 };
 
 function successOutcome(driverEventsCreated: number): SamsaraSyncOutcome {
@@ -86,6 +95,7 @@ function successOutcome(driverEventsCreated: number): SamsaraSyncOutcome {
     elapsedMs: 5,
     ...emptyStats,
     driverEventsCreated,
+    enrichment: emptyEnrichment,
   };
 }
 

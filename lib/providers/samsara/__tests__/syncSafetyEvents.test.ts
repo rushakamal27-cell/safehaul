@@ -709,10 +709,41 @@ describe("runSamsaraSafetyEventsSync — deduplication safety (cold-start re-fet
       });
       (prisma.driverEvent as any).create = async () => {
         driverEventCreateCalls++;
-        return {};
+        return { id: `de_${driverEventCreateCalls}` };
       };
 
       const mappingClient = makeMappingClient(["111"]);
+
+      // Phase 6B.4 — enrichment has no injectable client of its own on
+      // RunSyncDeps other than enrichmentDeps, so it must be fully faked
+      // here too (same "no real database/network access" principle this
+      // whole test already follows for ingestion) — otherwise the newly
+      // (fake-)created DriverEvent above would cause enrichNewDriverEvents
+      // to hit the REAL prisma.driverObservation and REAL
+      // captureDriverObservation. Not exercising enrichment behavior itself
+      // — that's covered in eventEnrichment.test.ts — just keeping it inert.
+      let enrichCallCount = 0;
+      const enrichmentDeps = {
+        observationClient: { async findFirst() { return null; } },
+        captureDriverObservationFn: async () => {
+          enrichCallCount++;
+          return {
+            id: "obs-inert",
+            driverId: "drv_1",
+            triggerType: "safety_event" as const,
+            driverEventId: null,
+            observedAt: "2026-08-01T12:00:00.000Z",
+            collectedAt: "2026-08-01T12:00:00.000Z",
+            latitude: null,
+            longitude: null,
+            speedMph: null,
+            hosShiftHoursUsed: null,
+            weatherRisk: null,
+            zoneRisk: null,
+            contextJson: {} as any,
+          };
+        },
+      };
 
       // Invocation 1: ingests the event fresh.
       const { client: syncStateClient1 } = makeSyncStateClient(null);
@@ -720,6 +751,7 @@ describe("runSamsaraSafetyEventsSync — deduplication safety (cold-start re-fet
         mappingClient,
         syncStateClient: syncStateClient1,
         fetchPage: async () => ({ data: [makeEvent()], pagination: { endCursor: "c1", hasNextPage: false } }),
+        enrichmentDeps,
       });
       assert.equal(outcome1.synced, true);
 
@@ -731,6 +763,7 @@ describe("runSamsaraSafetyEventsSync — deduplication safety (cold-start re-fet
         mappingClient,
         syncStateClient: syncStateClient2,
         fetchPage: async () => ({ data: [makeEvent()], pagination: { endCursor: "c2", hasNextPage: false } }),
+        enrichmentDeps,
       });
       assert.equal(outcome2.synced, true);
 
@@ -743,11 +776,247 @@ describe("runSamsaraSafetyEventsSync — deduplication safety (cold-start re-fet
       if (outcome2.synced && !outcome2.skipped) {
         assert.equal(outcome2.duplicates, 1, "the second invocation's own stats must report the re-fetched event as a duplicate");
       }
+      assert.equal(
+        enrichCallCount,
+        1,
+        "a duplicate/already-existing DriverEvent must not trigger a second enrichment attempt — only the genuinely new event from invocation 1 should ever reach the collector"
+      );
     } finally {
       (prisma.rawProviderEvent as any).findUnique = original.rawFindUnique;
       (prisma.rawProviderEvent as any).create = original.rawCreate;
       (prisma.driverProviderMapping as any).findUnique = original.mappingFindUnique;
       (prisma.driverEvent as any).create = original.driverEventCreate;
+    }
+  });
+});
+
+describe("runSamsaraSafetyEventsSync — Phase 6B.4 safety_event enrichment integration", () => {
+  // Same prisma-singleton monkey-patch approach as the dedup describe block
+  // above (t.mock.method can't stub Prisma 5's Proxy-wrapped delegates —
+  // see that block's comment). enrichmentDeps is always fully faked too, so
+  // no test in this block ever touches the real database or a real
+  // provider — only this module's own wiring (newDriverEventIds tracking,
+  // the enrichment hook's call site, failure isolation) is under test.
+
+  function patchPrisma(opts: { mappingFound: boolean }) {
+    const original = {
+      rawFindUnique: prisma.rawProviderEvent.findUnique,
+      rawCreate: prisma.rawProviderEvent.create,
+      mappingFindUnique: prisma.driverProviderMapping.findUnique,
+      driverEventCreate: prisma.driverEvent.create,
+    };
+
+    let nextDriverEventId = 1;
+    const storedRawEventIds = new Set<string>();
+
+    (prisma.rawProviderEvent as any).findUnique = async (args: any) => {
+      const id = args.where.provider_externalEventId.externalEventId;
+      return storedRawEventIds.has(id) ? { id: `raw-${id}` } : null;
+    };
+    (prisma.rawProviderEvent as any).create = async (args: any) => {
+      storedRawEventIds.add(args.data.externalEventId);
+      return { id: `raw-${args.data.externalEventId}` };
+    };
+    (prisma.driverProviderMapping as any).findUnique = async () =>
+      opts.mappingFound ? { driverId: "drv_1", isPilot: true, isActive: true } : null;
+    (prisma.driverEvent as any).create = async (args: any) => ({
+      id: `de_${nextDriverEventId++}`,
+      driverId: args.data.driverId,
+    });
+
+    return {
+      restore: () => {
+        (prisma.rawProviderEvent as any).findUnique = original.rawFindUnique;
+        (prisma.rawProviderEvent as any).create = original.rawCreate;
+        (prisma.driverProviderMapping as any).findUnique = original.mappingFindUnique;
+        (prisma.driverEvent as any).create = original.driverEventCreate;
+      },
+    };
+  }
+
+  function makeFakeCapturedObservation(driverId: string, driverEventId: string) {
+    return {
+      id: `obs-${driverEventId}`,
+      driverId,
+      triggerType: "safety_event" as const,
+      driverEventId,
+      observedAt: "2026-08-12T14:22:00.000Z",
+      collectedAt: "2026-08-12T14:22:00.000Z",
+      latitude: null,
+      longitude: null,
+      speedMph: null,
+      hosShiftHoursUsed: null,
+      weatherRisk: null,
+      zoneRisk: null,
+      contextJson: {} as any,
+    };
+  }
+
+  function makeEvent(id: string, label = "harshBrake"): SamsaraSafetyStreamEvent {
+    return {
+      id,
+      startMs: "2026-08-01T12:00:00.000Z",
+      behaviorLabels: [{ label }],
+      severity: "medium",
+      driver: { id: "111" },
+    };
+  }
+
+  test("a newly created DriverEvent triggers exactly one enrichment attempt, with the correct driverId and driverEventId", async () => {
+    const { restore } = patchPrisma({ mappingFound: true });
+    try {
+      const captureCalls: Array<{ driverId: string; triggerType: string; driverEventId?: string }> = [];
+      const outcome = await runSamsaraSafetyEventsSync(undefined, {
+        mappingClient: makeMappingClient(["111"]),
+        syncStateClient: makeSyncStateClient(null).client,
+        fetchPage: async () => ({ data: [makeEvent("evt-1")], pagination: { endCursor: "c1", hasNextPage: false } }),
+        enrichmentDeps: {
+          observationClient: { async findFirst() { return null; } },
+          captureDriverObservationFn: async (params) => {
+            captureCalls.push(params);
+            return makeFakeCapturedObservation(params.driverId, params.driverEventId!);
+          },
+        },
+      });
+
+      assert.equal(outcome.synced, true);
+      if (outcome.synced && !outcome.skipped) {
+        assert.equal(outcome.driverEventsCreated, 1);
+        assert.deepEqual(outcome.newDriverEventIds, ["de_1"]);
+        assert.equal(outcome.enrichment.eventsCreated, 1);
+        assert.equal(outcome.enrichment.enrichmentAttempted, 1);
+        assert.equal(outcome.enrichment.enrichmentCreated, 1);
+        assert.equal(outcome.enrichment.enrichmentSkipped, 0);
+        assert.equal(outcome.enrichment.enrichmentFailed, 0);
+      }
+
+      assert.equal(captureCalls.length, 1);
+      assert.deepEqual(captureCalls[0], { driverId: "drv_1", triggerType: "safety_event", driverEventId: "de_1" });
+    } finally {
+      restore();
+    }
+  });
+
+  test("multiple newly created DriverEvents on the same page each receive their own enrichment attempt", async () => {
+    const { restore } = patchPrisma({ mappingFound: true });
+    try {
+      const captureCalls: string[] = [];
+      const outcome = await runSamsaraSafetyEventsSync(undefined, {
+        mappingClient: makeMappingClient(["111"]),
+        syncStateClient: makeSyncStateClient(null).client,
+        fetchPage: async () => ({
+          data: [makeEvent("evt-a"), makeEvent("evt-b")],
+          pagination: { endCursor: "c1", hasNextPage: false },
+        }),
+        enrichmentDeps: {
+          observationClient: { async findFirst() { return null; } },
+          captureDriverObservationFn: async (params) => {
+            captureCalls.push(params.driverEventId!);
+            return makeFakeCapturedObservation(params.driverId, params.driverEventId!);
+          },
+        },
+      });
+
+      assert.equal(outcome.synced, true);
+      if (outcome.synced && !outcome.skipped) {
+        assert.equal(outcome.driverEventsCreated, 2);
+        assert.deepEqual(outcome.newDriverEventIds.sort(), ["de_1", "de_2"]);
+        assert.equal(outcome.enrichment.enrichmentCreated, 2);
+      }
+      assert.equal(captureCalls.length, 2);
+      assert.deepEqual(captureCalls.sort(), ["de_1", "de_2"]);
+    } finally {
+      restore();
+    }
+  });
+
+  test("an existing safety_event observation for a driverEventId is skipped as already_enriched, not duplicated", async () => {
+    const { restore } = patchPrisma({ mappingFound: true });
+    try {
+      let captureCalls = 0;
+      const outcome = await runSamsaraSafetyEventsSync(undefined, {
+        mappingClient: makeMappingClient(["111"]),
+        syncStateClient: makeSyncStateClient(null).client,
+        fetchPage: async () => ({ data: [makeEvent("evt-1")], pagination: { endCursor: "c1", hasNextPage: false } }),
+        enrichmentDeps: {
+          // Simulates a DriverObservation already existing for this event
+          // (e.g. a previous enrichment attempt already succeeded).
+          observationClient: { async findFirst() { return { id: "existing-obs" }; } },
+          captureDriverObservationFn: async (params) => {
+            captureCalls++;
+            return makeFakeCapturedObservation(params.driverId, params.driverEventId!);
+          },
+        },
+      });
+
+      assert.equal(outcome.synced, true);
+      if (outcome.synced && !outcome.skipped) {
+        assert.equal(outcome.enrichment.enrichmentSkipped, 1);
+        assert.equal(outcome.enrichment.enrichmentCreated, 0);
+      }
+      assert.equal(captureCalls, 0, "the collector must never be called once already_enriched is detected");
+    } finally {
+      restore();
+    }
+  });
+
+  test("an enrichment failure does NOT cause the Safety Events sync itself to fail", async () => {
+    const { restore } = patchPrisma({ mappingFound: true });
+    try {
+      const outcome = await runSamsaraSafetyEventsSync(undefined, {
+        mappingClient: makeMappingClient(["111"]),
+        syncStateClient: makeSyncStateClient(null).client,
+        fetchPage: async () => ({ data: [makeEvent("evt-1")], pagination: { endCursor: "c1", hasNextPage: false } }),
+        enrichmentDeps: {
+          observationClient: { async findFirst() { return null; } },
+          captureDriverObservationFn: async () => {
+            throw new Error("simulated provider failure during enrichment");
+          },
+        },
+      });
+
+      assert.equal(outcome.synced, true, "ingestion succeeded — enrichment failing must not flip this to false");
+      if (outcome.synced && !outcome.skipped) {
+        assert.equal(outcome.driverEventsCreated, 1, "the DriverEvent itself is still persisted");
+        assert.equal(outcome.enrichment.enrichmentFailed, 1);
+        assert.equal(outcome.enrichment.enrichmentCreated, 0);
+      }
+    } finally {
+      restore();
+    }
+  });
+
+  test("unsupported labels still behave exactly as before: no DriverEvent, no enrichment attempt", async () => {
+    const { restore } = patchPrisma({ mappingFound: true });
+    try {
+      let captureCalls = 0;
+      const outcome = await runSamsaraSafetyEventsSync(undefined, {
+        mappingClient: makeMappingClient(["111"]),
+        syncStateClient: makeSyncStateClient(null).client,
+        fetchPage: async () => ({
+          data: [makeEvent("evt-unsupported", "SomeFutureUnmappedLabel")],
+          pagination: { endCursor: "c1", hasNextPage: false },
+        }),
+        enrichmentDeps: {
+          observationClient: { async findFirst() { return null; } },
+          captureDriverObservationFn: async () => {
+            captureCalls++;
+            throw new Error("must never be called for an unsupported label");
+          },
+        },
+      });
+
+      assert.equal(outcome.synced, true);
+      if (outcome.synced && !outcome.skipped) {
+        assert.equal(outcome.driverEventsCreated, 0);
+        assert.equal(outcome.skipReasons.unsupported_behavior_label, 1);
+        assert.deepEqual(outcome.newDriverEventIds, []);
+        assert.equal(outcome.enrichment.eventsCreated, 0);
+        assert.equal(outcome.enrichment.enrichmentAttempted, 0);
+      }
+      assert.equal(captureCalls, 0);
+    } finally {
+      restore();
     }
   });
 });
