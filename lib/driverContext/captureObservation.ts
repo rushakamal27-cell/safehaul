@@ -86,6 +86,8 @@ export interface CaptureDriverObservationDeps {
     create(args: { data: Prisma.DriverObservationUncheckedCreateInput }): Promise<{ id: string }>;
   };
   isPilotDriver?: (driverId: string) => Promise<boolean>;
+  /** Injectable clock — defaults to `() => new Date()`. Exists so callers that need a fully deterministic run (tests; the baseline sync orchestrator's own recency guard) can keep observedAt/collectedAt consistent with whatever clock they're already using elsewhere in the same call. */
+  now?: () => Date;
   assembleLocationFn?: typeof assembleLocation;
   assembleWeatherFn?: typeof assembleWeather;
   assembleZoneRiskFn?: typeof assembleZoneRisk;
@@ -179,7 +181,8 @@ export async function buildDriverObservationSnapshot(
   // separate DriverObservation columns anyway for a future async/backfill
   // collector (see the schema comment) — that distinction is not introduced
   // here.
-  const now = new Date().toISOString();
+  const nowFn = deps.now ?? (() => new Date());
+  const now = nowFn().toISOString();
 
   // Same dependency order as assembleDriverContext: location first
   // (weather/zone/speed all reuse its GPS reading rather than re-fetching),
@@ -219,17 +222,16 @@ export async function buildDriverObservationSnapshot(
 }
 
 /**
- * Builds a snapshot (buildDriverObservationSnapshot) and persists it as a
- * new DriverObservation row. The only new failure mode versus the snapshot
- * builder is the prisma write itself — matches this phase's requirement
- * that only an invalid driver/event or a database failure should fail the
- * whole observation, never an individual unavailable contextual input.
+ * Persists an already-built snapshot as a new DriverObservation row. Split
+ * out from captureDriverObservation (Phase 6B.3) so a caller that needs to
+ * inspect the snapshot BEFORE deciding whether to write it — e.g. the
+ * baseline sync route's fresh-location gate — can do so without a second,
+ * duplicate fetch: build once, decide, persist only if warranted.
  */
-export async function captureDriverObservation(
-  params: CaptureDriverObservationParams,
+export async function persistDriverObservationSnapshot(
+  snapshot: DriverObservationSnapshot,
   deps: CaptureDriverObservationDeps = {}
 ): Promise<CapturedDriverObservation> {
-  const snapshot = await buildDriverObservationSnapshot(params, deps);
   const observationClient = deps.observationClient ?? prisma.driverObservation;
 
   const created = await observationClient.create({
@@ -250,4 +252,23 @@ export async function captureDriverObservation(
   });
 
   return { ...snapshot, id: created.id };
+}
+
+/**
+ * Builds a snapshot (buildDriverObservationSnapshot) and persists it
+ * unconditionally as a new DriverObservation row. The only new failure mode
+ * versus the snapshot builder is the prisma write itself — matches this
+ * phase's requirement that only an invalid driver/event or a database
+ * failure should fail the whole observation, never an individual
+ * unavailable contextual input. Callers that need to gate persistence on
+ * something about the snapshot (e.g. location freshness) should call
+ * buildDriverObservationSnapshot + persistDriverObservationSnapshot
+ * directly instead — see lib/driverContext/baselineObservationSync.ts.
+ */
+export async function captureDriverObservation(
+  params: CaptureDriverObservationParams,
+  deps: CaptureDriverObservationDeps = {}
+): Promise<CapturedDriverObservation> {
+  const snapshot = await buildDriverObservationSnapshot(params, deps);
+  return persistDriverObservationSnapshot(snapshot, deps);
 }
