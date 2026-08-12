@@ -18,30 +18,31 @@ model Company {
 }
 
 model Driver {
-  id               String                  @id @default(cuid())
-  telegramUserId   String                  @unique
+  id                 String                  @id @default(cuid())
+  telegramUserId     String                  @unique
   /// Telegram first name at last /api/driver call. Legacy field name; this is
   /// authentication-identity, not the operational identity — see canonicalName.
-  name             String
-  telegramLastName String?
-  telegramUsername String?
-  samsaraDriverId  String?
+  name               String
+  telegramLastName   String?
+  telegramUsername   String?
+  samsaraDriverId    String?
   /// Operational identity for reports/dashboards/analytics. Nullable until a
   /// provider mapping with a known name exists. Auto-synced from the active
   /// provider mapping's providerDriverName (see lib/driverIdentity.ts) —
   /// no manual override exists yet.
-  canonicalName    String?
-  companyId        String
-  company          Company                 @relation(fields: [companyId], references: [id])
-  createdAt        DateTime                @default(now())
-  trips            Trip[]
-  safetyEvents     SafetyEvent[]
-  complianceScores ComplianceScore[]
-  incidents        Incident[]
-  inspections      Inspection[]
-  providerMappings DriverProviderMapping[]
-  driverEvents     DriverEvent[]
-  legalAcceptances LegalAcceptance[]
+  canonicalName      String?
+  companyId          String
+  company            Company                 @relation(fields: [companyId], references: [id])
+  createdAt          DateTime                @default(now())
+  trips              Trip[]
+  safetyEvents       SafetyEvent[]
+  complianceScores   ComplianceScore[]
+  incidents          Incident[]
+  inspections        Inspection[]
+  providerMappings   DriverProviderMapping[]
+  driverEvents       DriverEvent[]
+  legalAcceptances   LegalAcceptance[]
+  driverObservations DriverObservation[]
 }
 
 model Trip {
@@ -141,22 +142,22 @@ model ProviderAccount {
 /// Exactly one mapping per driver per provider is enforced by the unique constraint.
 /// `provider` is denormalized from ProviderAccount for direct filtering without a join.
 model DriverProviderMapping {
-  id                String           @id @default(cuid())
-  driverId          String
-  driver            Driver           @relation(fields: [driverId], references: [id])
-  providerAccountId String?
-  providerAccount   ProviderAccount? @relation(fields: [providerAccountId], references: [id])
-  provider          String // "samsara" | "geotab" | etc. (denormalized)
-  externalDriverId  String // driver ID in the external system
+  id                 String           @id @default(cuid())
+  driverId           String
+  driver             Driver           @relation(fields: [driverId], references: [id])
+  providerAccountId  String?
+  providerAccount    ProviderAccount? @relation(fields: [providerAccountId], references: [id])
+  provider           String // "samsara" | "geotab" | etc. (denormalized)
+  externalDriverId   String // driver ID in the external system
   /// Raw driver name as last reported by the provider (e.g. Samsara driver.name
   /// on an inbound event). Drives Driver.canonicalName — see lib/driverIdentity.ts.
   providerDriverName String?
-  externalVehicleId String? // vehicle / asset ID in the external system
-  isPilot           Boolean          @default(false)
-  isActive          Boolean          @default(true)
-  syncedAt          DateTime? // timestamp of last successful data sync
-  createdAt         DateTime         @default(now())
-  updatedAt         DateTime         @updatedAt
+  externalVehicleId  String? // vehicle / asset ID in the external system
+  isPilot            Boolean          @default(false)
+  isActive           Boolean          @default(true)
+  syncedAt           DateTime? // timestamp of last successful data sync
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
 
   @@unique([provider, externalDriverId])
   @@unique([driverId, provider])
@@ -250,11 +251,11 @@ model HosObservation {
 ///
 /// TODO: Wire into risk engine in Phase 4.
 model DriverEvent {
-  id                 String           @id @default(cuid())
+  id                 String              @id @default(cuid())
   driverId           String
-  driver             Driver           @relation(fields: [driverId], references: [id])
+  driver             Driver              @relation(fields: [driverId], references: [id])
   rawProviderEventId String
-  rawProviderEvent   RawProviderEvent @relation(fields: [rawProviderEventId], references: [id])
+  rawProviderEvent   RawProviderEvent    @relation(fields: [rawProviderEventId], references: [id])
   provider           String // source provider (denormalized for query convenience)
   externalDriverId   String // external ID at event time (audit trail)
   externalVehicleId  String? // external vehicle ID at event time
@@ -263,12 +264,100 @@ model DriverEvent {
   timestamp          DateTime // event time as reported by provider
   lat                Float?
   lng                Float?
-  createdAt          DateTime         @default(now())
+  createdAt          DateTime            @default(now())
+  driverObservations DriverObservation[]
 
   @@index([driverId])
   @@index([driverId, timestamp])
   @@index([type])
   @@index([provider])
+}
+
+/// Point-in-time snapshot of a pilot driver's operational context (location,
+/// speed, HOS, weather, zone risk) — Phase 6B, "what conditions existed."
+/// Deliberately separate from DriverEvent ("what happened") and any future
+/// RiskScoreHistory ("what SafeHaul calculated from those conditions") — see
+/// the Phase 6B design writeup for why these stay three distinct concepts
+/// rather than collapsing into one table.
+///
+/// Phase 6B.1 adds this table only. Nothing writes to it yet — no collector,
+/// no scheduler, no Safety Event hook exist as of this migration. See
+/// lib/driverContext/assemble.ts and lib/driverContext/types.ts for the
+/// existing provenance model this table is designed to sit alongside, not
+/// replace: DriverContextField/VehicleLocation/WeatherDetail/HosDetail/
+/// ZoneDetail already carry origin/state/provider/observedAt/fetchedAt per
+/// field — contextJson below is intended to store those existing typed
+/// objects directly once a collector exists, never a reinvented parallel
+/// vocabulary of new provenance columns.
+model DriverObservation {
+  id       String @id @default(cuid())
+  driverId String
+  driver   Driver @relation(fields: [driverId], references: [id])
+
+  /// "interval" (periodic baseline while a pilot vehicle is active) |
+  /// "safety_event" (best-effort capture triggered by a newly discovered
+  /// Safety Event) — plain string, matching this schema's existing
+  /// convention for status/type discriminators (see DriverEvent.type,
+  /// ProviderSyncState's cursor semantics) rather than a Prisma enum.
+  triggerType String
+
+  /// Set only when triggerType = "safety_event" — records *why* this row
+  /// was captured, not an exhaustive link registry. Deliberately NOT
+  /// @unique: nothing should prevent multiple DriverObservation rows from
+  /// referencing the same DriverEvent (e.g. a future retry or a design
+  /// change that captures more than once per event) — see the Phase 6B
+  /// dedup-window design for how duplicate captures are actually avoided
+  /// (a time-based cooldown guard in the collector, not a DB constraint).
+  /// No explicit onDelete is set here, matching this schema's existing
+  /// convention for optional relations (see SafetyEvent.trip/Incident.trip/
+  /// Inspection.trip, none of which declare one either): Prisma's implicit
+  /// default for an OPTIONAL relation is onDelete: SetNull, which is exactly
+  /// the desired behavior — deleting a DriverEvent must never cascade-delete
+  /// the historical DriverObservation rows that reference it; the
+  /// observation survives with driverEventId set to null instead.
+  driverEventId String?
+  driverEvent   DriverEvent? @relation(fields: [driverEventId], references: [id])
+
+  /// The instant the conditions in this row are claimed to represent.
+  /// Deliberately NOT the same field as DriverEvent.timestamp (eventAt) —
+  /// for a safety_event-triggered row this is the discovery/collection
+  /// instant, never backdated to when the event actually happened. There is
+  /// intentionally no `eventAt` column on this model: for event-triggered
+  /// rows, eventAt already lives on the linked DriverEvent.timestamp via
+  /// driverEventId — duplicating it here would be a second source of truth.
+  observedAt DateTime
+
+  /// The wall-clock instant SafeHaul's collector actually ran the fetch.
+  /// Kept as a separate column from observedAt even though the two will
+  /// coincide for every row Phase 6B.2's synchronous collector produces —
+  /// this is forward-compatibility for a future async/backfill-capable
+  /// collector, not a distinction that matters yet.
+  collectedAt DateTime @default(now())
+
+  /// Query-friendly scalar projections for future analytics/ML feature
+  /// extraction ONLY — never a second source of truth. Full provenance
+  /// (origin/state/provider/observedAt/fetchedAt per field) belongs in
+  /// contextJson, reusing the existing DriverContext-adjacent detail types
+  /// verbatim rather than being re-derived as more columns here.
+  latitude          Float?
+  longitude         Float?
+  speedMph          Float?
+  hosShiftHoursUsed Float?
+  weatherRisk       Float?
+  zoneRisk          Float?
+
+  /// Full context snapshot — intended to hold the existing VehicleLocation /
+  /// WeatherDetail / HosDetail / ZoneDetail objects (lib/driverContext/types.ts)
+  /// as captured by a future collector. Required (not nullable): a
+  /// DriverObservation row only makes sense once a collector has actually
+  /// captured context — Phase 6B.1 creates no rows at all, so this
+  /// constraint has no existing data to violate.
+  contextJson Json
+
+  createdAt DateTime @default(now())
+
+  @@index([driverId, observedAt])
+  @@index([driverEventId])
 }
 
 // ---------------------------------------------------------------------------
