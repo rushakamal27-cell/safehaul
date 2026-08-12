@@ -303,11 +303,19 @@ model DriverObservation {
 
   /// Set only when triggerType = "safety_event" — records *why* this row
   /// was captured, not an exhaustive link registry. Deliberately NOT
-  /// @unique: nothing should prevent multiple DriverObservation rows from
-  /// referencing the same DriverEvent (e.g. a future retry or a design
-  /// change that captures more than once per event) — see the Phase 6B
-  /// dedup-window design for how duplicate captures are actually avoided
-  /// (a time-based cooldown guard in the collector, not a DB constraint).
+  /// @unique on its own: nothing should prevent a DIFFERENT triggerType from
+  /// referencing the same DriverEvent in some future design. The composite
+  /// @@unique([driverEventId, triggerType]) below (Phase 6B.5) is the real
+  /// guarantee this model makes: at most one "safety_event" observation per
+  /// DriverEvent — enforced at the DB level as the source of truth (see
+  /// lib/driverContext/eventEnrichment.ts's P2002 handling), with
+  /// enrichment's own findFirst pre-check only as an optimization to avoid
+  /// the provider round-trip on the common (non-racing) path. PostgreSQL
+  /// treats every NULL as distinct under a unique constraint, so this never
+  /// limits "interval" observations (driverEventId always null there) —
+  /// verified against the live database before this constraint was added:
+  /// three pre-existing "interval" rows, all with driverEventId = null,
+  /// coexisted under this constraint with no conflict.
   /// No explicit onDelete is set here, matching this schema's existing
   /// convention for optional relations (see SafetyEvent.trip/Incident.trip/
   /// Inspection.trip, none of which declare one either): Prisma's implicit
@@ -356,6 +364,7 @@ model DriverObservation {
 
   createdAt DateTime @default(now())
 
+  @@unique([driverEventId, triggerType])
   @@index([driverId, observedAt])
   @@index([driverEventId])
 }

@@ -42,6 +42,15 @@ export interface EnrichmentStats {
   enrichmentFailed: number;
 }
 
+/** Same P2002-detection pattern used in lib/providers/samsara/syncLock.ts and syncSafetyEvents.ts — kept as a local copy rather than a shared util, matching this codebase's existing precedent of small, independent copies over a premature shared abstraction. */
+function isUniqueConstraintViolation(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { code?: string }).code === "P2002"
+  );
+}
+
 function emptyEnrichmentStats(eventsCreated: number): EnrichmentStats {
   return {
     eventsCreated,
@@ -111,6 +120,26 @@ export async function enrichNewDriverEvents(
       );
       stats.enrichmentCreated++;
     } catch (err) {
+      if (isUniqueConstraintViolation(err)) {
+        // The findFirst pre-check above is an optimization, not the source
+        // of truth — DriverObservation's DB-level
+        // @@unique([driverEventId, triggerType]) constraint (Phase 6B.5) is.
+        // A concurrent enrichment attempt won the race and created this
+        // event's observation between our pre-check and our own create()
+        // call. Same P2002-as-"someone else already did this" pattern
+        // already used elsewhere in this codebase (RawProviderEvent
+        // dedup in syncSafetyEvents.ts, the sync lock in syncLock.ts) —
+        // this is exactly already_enriched, not a real failure.
+        console.info(
+          `[event-enrichment] driverEventId="${event.id}" was already enriched by a concurrent attempt (unique constraint) — treating as already_enriched.`
+        );
+        stats.enrichmentSkipped++;
+        continue;
+      }
+
+      // Any other error (a real DB failure, a provider failure the
+      // collector itself couldn't recover from, etc.) is a genuine
+      // enrichment failure — never hidden under the already_enriched path.
       console.error(
         `[event-enrichment] Failed to capture observation for driverEventId="${event.id}":`,
         err instanceof Error ? err.message : err

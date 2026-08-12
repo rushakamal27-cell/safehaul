@@ -6,44 +6,16 @@
  * project's Hobby plan cannot run it reliably): instead, the first request
  * that finds Samsara data stale triggers a refresh inline.
  *
- * Concurrency guard:
- *   Multiple Heads-Up requests can arrive at the same instant across separate
- *   serverless instances, so an in-memory flag would not prevent duplicate
- *   syncs. The lock lives entirely in ProviderSyncState.syncLockedAt and is
- *   claimed in two atomic steps that together cover both cold start (no row
- *   yet) and warm state (row exists, lock null or stale):
- *
- *     1. INSERT a row with syncLockedAt = now. If no row exists yet, this
- *        single INSERT both creates the row AND claims the lock — Postgres
- *        guarantees only one concurrent INSERT can win a unique key, so
- *        exactly one cold-start racer succeeds; the rest get a unique
- *        constraint violation (P2002), which is caught and treated as
- *        "someone else got here first" rather than an error. This mirrors
- *        the create+catch(P2002) pattern already used for RawProviderEvent
- *        in syncSafetyEvents.ts — we do not rely on upsert()'s internal
- *        atomicity, which is not a guarantee this codebase trusts elsewhere.
- *     2. If the row already existed (INSERT lost the race, or a previous
- *        run created it), fall back to a single atomic UPDATE:
- *          UPDATE ... WHERE syncLockedAt IS NULL OR syncLockedAt < staleThreshold
- *        Postgres row-locks the matching row for the duration of the UPDATE,
- *        so concurrent claims serialize and only one caller sees rowCount = 1.
- *
- *   Losers of either step skip syncing and fall back to whatever DriverEvents
- *   already exist — they do not wait on the winner. RawProviderEvent's unique
- *   constraint remains a second line of defense against duplicate event rows
- *   regardless.
- *
- * Timeout:
- *   Bounded to 6s via AbortController, which actually cancels the in-flight
- *   Samsara fetch (not just the awaiting promise). Chosen because Vercel's
- *   Hobby plan defaults serverless functions to a 10s execution limit — 6s
- *   leaves headroom for the rest of /api/risk (parallel lookups, trip/score
- *   writes) to complete after the sync attempt resolves either way.
- *
- * Lock staleness:
- *   Set well above the sync timeout (20s vs 6s) so a lock is never reclaimed
- *   out from under a sync that is still legitimately running — it only
- *   protects against a lock left behind by a crashed/killed instance.
+ * Phase 6B.5: the actual DB-backed lock this module relies on now lives in
+ * lib/providers/samsara/syncLock.ts (withSamsaraSyncLock), shared with
+ * app/api/sync/samsara-safety-events/route.ts so an on-demand sync and a
+ * manual/future-scheduled sync can never run concurrently. This module's
+ * own job narrows to exactly one concern: deciding WHETHER a refresh is
+ * worth attempting at all (the 5-minute freshness gate below) and mapping
+ * the shared lock's outcome onto this module's own OnDemandSyncStatus
+ * vocabulary. See syncLock.ts's file header for why lock acquisition,
+ * the freshness decision, and the sync timeout are kept as three
+ * independent concerns rather than being bundled together.
  *
  * Statuses:
  *   "fresh"            — lastSyncAt was readable and under 5 minutes old. No
@@ -56,7 +28,9 @@
  *                         DriverEvents are used as a fallback either way.
  *   "sync_in_progress"  — this request needed a refresh but lost the lock
  *                         race to a concurrent request that is already
- *                         syncing (or holds a not-yet-stale lock).
+ *                         syncing (or holds a not-yet-stale lock) — this now
+ *                         includes losing the race to a manual/scheduled ops
+ *                         sync, not just another on-demand request.
  *   There is deliberately no separate "no sync state" status: a missing or
  *   unreadable ProviderSyncState row is treated as "not fresh" and funnels
  *   into the same refresh attempt as a stale row, resolving to one of the
@@ -64,16 +38,20 @@
  */
 
 import { prisma } from "@/lib/prisma";
+import { PROVIDER, STREAM_KEY, type SamsaraSyncOutcome } from "./syncSafetyEvents";
 import {
-  runSamsaraSafetyEventsSync,
-  PROVIDER,
-  STREAM_KEY,
-  type SamsaraSyncOutcome,
-} from "./syncSafetyEvents";
+  withSamsaraSyncLock,
+  type ProviderSyncStateClient,
+} from "./syncLock";
+
+// Re-exported so existing imports of ProviderSyncStateClient from this
+// module (tests, callers written before Phase 6B.5) keep working unchanged
+// — the type itself now lives in syncLock.ts, the module that actually owns
+// the lock mechanics.
+export type { ProviderSyncStateClient };
 
 const FRESHNESS_MS = 5 * 60 * 1000; // matches the product spec's staleness threshold — see docs/data-freshness.md for how this compares to the other freshness thresholds in the codebase
 const SYNC_TIMEOUT_MS = 6_000;
-const LOCK_STALE_MS = 20_000;
 
 export type OnDemandSyncStatus =
   | "fresh"
@@ -85,75 +63,6 @@ export interface OnDemandSyncDecision {
   status: OnDemandSyncStatus;
   previousLastSyncAt: Date | null;
   elapsedMs: number;
-}
-
-/** Minimal slice of the Prisma ProviderSyncState delegate this module needs — narrow enough to fake in tests. */
-export interface ProviderSyncStateClient {
-  findUnique(args: {
-    where: { provider_streamKey: { provider: string; streamKey: string } };
-    select: { lastSyncAt: true };
-  }): Promise<{ lastSyncAt: Date | null } | null>;
-  create(args: {
-    data: { provider: string; streamKey: string; syncLockedAt: Date };
-  }): Promise<unknown>;
-  updateMany(args: {
-    where: {
-      provider: string;
-      streamKey: string;
-      OR: [{ syncLockedAt: null }, { syncLockedAt: { lt: Date } }];
-    };
-    data: { syncLockedAt: Date };
-  }): Promise<{ count: number }>;
-  update(args: {
-    where: { provider_streamKey: { provider: string; streamKey: string } };
-    data: { syncLockedAt: Date | null };
-  }): Promise<unknown>;
-}
-
-function isUniqueConstraintViolation(err: unknown): boolean {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    (err as { code?: string }).code === "P2002"
-  );
-}
-
-async function tryAcquireLock(
-  client: ProviderSyncStateClient,
-  now: Date
-): Promise<boolean> {
-  // Step 1: race-safe row creation + lock claim in one atomic INSERT.
-  try {
-    await client.create({
-      data: { provider: PROVIDER, streamKey: STREAM_KEY, syncLockedAt: now },
-    });
-    return true;
-  } catch (err: unknown) {
-    if (!isUniqueConstraintViolation(err)) throw err;
-    // Row already existed — fall through to claim it via atomic UPDATE.
-  }
-
-  // Step 2: row exists (created just now by a racer, or from a prior run).
-  const staleBefore = new Date(now.getTime() - LOCK_STALE_MS);
-  const claim = await client.updateMany({
-    where: {
-      provider: PROVIDER,
-      streamKey: STREAM_KEY,
-      OR: [{ syncLockedAt: null }, { syncLockedAt: { lt: staleBefore } }],
-    },
-    data: { syncLockedAt: now },
-  });
-
-  return claim.count === 1;
-}
-
-async function releaseLock(client: ProviderSyncStateClient): Promise<void> {
-  await client
-    .update({
-      where: { provider_streamKey: { provider: PROVIDER, streamKey: STREAM_KEY } },
-      data: { syncLockedAt: null },
-    })
-    .catch((err) => console.error("[on-demand-sync] Failed to release lock:", err));
 }
 
 export interface OnDemandSyncDeps {
@@ -175,7 +84,6 @@ export async function ensureFreshSamsaraSync(
   deps: OnDemandSyncDeps = {}
 ): Promise<OnDemandSyncDecision> {
   const client = deps.client ?? (prisma.providerSyncState as unknown as ProviderSyncStateClient);
-  const runSync = deps.runSync ?? runSamsaraSafetyEventsSync;
   const timeoutMs = deps.timeoutMs ?? SYNC_TIMEOUT_MS;
 
   const decisionStart = Date.now();
@@ -207,38 +115,23 @@ export async function ensureFreshSamsaraSync(
     return { status: "fresh", previousLastSyncAt, elapsedMs: elapsed() };
   }
 
-  // Missing, stale, or unreadable sync state — all funnel into "attempt a refresh".
-  let acquired: boolean;
-  try {
-    acquired = await tryAcquireLock(client, new Date());
-  } catch (err) {
-    console.error("[on-demand-sync] Failed to acquire sync lock:", err);
-    return { status: "refresh_failed", previousLastSyncAt, elapsedMs: elapsed() };
-  }
+  // Missing, stale, or unreadable sync state — all funnel into "attempt a
+  // refresh" via the shared lock. Passes the tight 6s timeoutMs explicitly —
+  // this path is embedded inside /api/risk's own request budget, unlike the
+  // manual ops route (see syncLock.ts's file header).
+  const lockResult = await withSamsaraSyncLock({ client, runSync: deps.runSync, timeoutMs });
 
-  if (!acquired) {
-    // Another instance already holds a live lock — do not stack a second sync.
-    return { status: "sync_in_progress", previousLastSyncAt, elapsedMs: elapsed() };
-  }
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const outcome = await runSync(controller.signal);
-    return {
-      status: outcome.synced ? "refreshed" : "refresh_failed",
-      previousLastSyncAt,
-      elapsedMs: elapsed(),
-    };
-  } catch (err) {
-    console.error(
-      "[on-demand-sync] Sync attempt threw:",
-      err instanceof Error ? err.message : err
-    );
-    return { status: "refresh_failed", previousLastSyncAt, elapsedMs: elapsed() };
-  } finally {
-    clearTimeout(timeoutId);
-    await releaseLock(client);
+  switch (lockResult.status) {
+    case "sync_in_progress":
+      return { status: "sync_in_progress", previousLastSyncAt, elapsedMs: elapsed() };
+    case "lock_acquire_failed":
+    case "sync_threw":
+      return { status: "refresh_failed", previousLastSyncAt, elapsedMs: elapsed() };
+    case "acquired":
+      return {
+        status: lockResult.outcome.synced ? "refreshed" : "refresh_failed",
+        previousLastSyncAt,
+        elapsedMs: elapsed(),
+      };
   }
 }

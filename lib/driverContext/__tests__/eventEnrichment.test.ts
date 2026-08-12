@@ -135,6 +135,61 @@ describe("enrichNewDriverEvents — idempotency (already_enriched)", () => {
   });
 });
 
+describe("enrichNewDriverEvents — Phase 6B.5 DB-constraint race handling", () => {
+  test("a P2002 on create() (pre-check missed a concurrent winner) is treated as already_enriched, not a failure", async () => {
+    const stats = await enrichNewDriverEvents([{ id: "de_1", driverId: "drv_1" }], {
+      // The pre-check sees nothing yet — a concurrent enricher hasn't
+      // committed its create() until just after this findFirst runs.
+      observationClient: { async findFirst() { return null; } },
+      captureDriverObservationFn: async () => {
+        const err = new Error("Unique constraint failed on the fields: (`driverEventId`,`triggerType`)") as Error & { code: string };
+        err.code = "P2002";
+        throw err;
+      },
+    });
+
+    assert.equal(stats.enrichmentSkipped, 1, "must count as already_enriched, not a failure");
+    assert.equal(stats.enrichmentFailed, 0);
+    assert.equal(stats.enrichmentCreated, 0);
+  });
+
+  test("a P2002 for one event does not affect enrichment of a different event", async () => {
+    const stats = await enrichNewDriverEvents(
+      [
+        { id: "de_1", driverId: "drv_1" },
+        { id: "de_2", driverId: "drv_2" },
+      ],
+      {
+        observationClient: { async findFirst() { return null; } },
+        captureDriverObservationFn: async (params) => {
+          if (params.driverEventId === "de_1") {
+            const err = new Error("Unique constraint failed") as Error & { code: string };
+            err.code = "P2002";
+            throw err;
+          }
+          return fakeCaptured(params.driverId, params.driverEventId!);
+        },
+      }
+    );
+
+    assert.equal(stats.enrichmentSkipped, 1);
+    assert.equal(stats.enrichmentCreated, 1);
+    assert.equal(stats.enrichmentFailed, 0);
+  });
+
+  test("a genuine, unrelated DB error on create() is still counted as a real failure, never hidden as already_enriched", async () => {
+    const stats = await enrichNewDriverEvents([{ id: "de_1", driverId: "drv_1" }], {
+      observationClient: { async findFirst() { return null; } },
+      captureDriverObservationFn: async () => {
+        throw new Error("connection to database lost");
+      },
+    });
+
+    assert.equal(stats.enrichmentFailed, 1, "an unrelated DB error must never be mistaken for already_enriched");
+    assert.equal(stats.enrichmentSkipped, 0);
+  });
+});
+
 describe("enrichNewDriverEvents — failure isolation", () => {
   test("one event's capture failure does not stop enrichment of the others", async () => {
     const stats = await enrichNewDriverEvents(
