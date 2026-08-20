@@ -88,6 +88,250 @@ Calculate Risk
 Return Heads-Up response
 ```
 
+---
+
+# Completed 2026-07-15: Real HOS and Heads-Up Summary Data
+
+Replaced simulated HOS and Today's Summary values with real data for pilot
+drivers, live-validated against the real Samsara pilot account (not just
+unit tests):
+
+* **HOS**: `lib/providers/samsara/hos.ts` calls `GET /fleet/hos/clocks`
+  (path confirmed live). Exposed via `/api/risk`'s new `hos` object
+  (`drivingHoursUsed`/`drivingHoursRemaining`/`shiftHoursUsed`/`status`/
+  `source`/`updatedAt`). Unlike speed/zoneRisk, a failed or unresolvable
+  pilot fetch yields `value: null, state: "unavailable"` — never a mock
+  substitute — so `RiskInput.hosHours` is now `number | null` and the risk
+  engine's fatigue penalty is null-aware (`lib/riskEngine.ts`) instead of
+  defaulting unknown HOS to a fabricated 0.
+* **Checks Passed**: real, from the `Inspection` table
+  (`overallResult === "PASS"`, current UTC day) — for every driver, pilot or
+  not, since inspections are SafeHaul-native data, not provider-dependent.
+* **Miles Driven**: real for pilot drivers, via Samsara **Vehicle Statistics
+  History** odometer delta (`lib/providers/samsara/vehicleStats.ts`), not
+  Trips. `GET /fleet/trips` and `GET /fleet/vehicles/{id}/trips` were both
+  tested live with a valid vehicle ID and the "Read Vehicle Trips"
+  permission granted — both returned a plain-text gateway 404, confirming
+  neither is a real route in this API generation. Vehicle Stats History
+  (`GET /fleet/vehicles/stats/history?types=obdOdometerMeters`) is now
+  SafeHaul's canonical mileage source: `data[].obdOdometerMeters` is an
+  array of `{time, value}` readings (value in **meters**, time ISO 8601
+  `Z`-suffixed); mileage = latest reading − earliest reading in the UTC-day
+  window. Pagination is drained (a same-day window returned 340+ readings
+  in ~3 hours in testing). A negative delta (odometer rollback) resolves to
+  `null`, never a fabricated 0.
+* **Alerts Active**: now `result.factors.length` (distinct risk categories
+  with a nonzero penalty), replacing a raw safety-event count that didn't
+  match the categories shown elsewhere on Heads-Up.
+* **Vehicle resolution bug found and worked around**: the pilot's
+  `DriverProviderMapping.externalVehicleId` was seeded with the vehicle's
+  **display name**, not its Samsara ID (discovered when a live Vehicle
+  Stats call returned a structured 400 "Invalid ID format"). `lib/todaySummary.ts`
+  now treats a non-numeric `externalVehicleId` as missing and falls through
+  to the most recent `DriverEvent.externalVehicleId` — this is a defensive
+  workaround, not a fix to the underlying row (see follow-ups below).
+* All new Samsara calls are timeout-bounded (`AbortController`) and
+  non-fatal — one unavailable provider call never breaks the rest of
+  `/api/risk`.
+
+**Deployed:** commit `8f44b12` on `main`.
+
+## Follow-ups (not yet done)
+
+1. **Validate HOS entry-level fields for real.** The pilot driver had no
+   active HOS clock at validation time (`GET /fleet/hos/clocks` returned
+   `data: []`) — the endpoint path and envelope shape are confirmed, but
+   entry fields (`clocks.drive.durationMsRemaining`,
+   `clocks.shift.durationMsElapsed`, `lastUpdatedAtTime`) in
+   `lib/providers/samsara/hos.ts` are still unvalidated guesses. Re-run
+   validation once the pilot driver has an active clock.
+2. **Correct the invalid `externalVehicleId` seed data at its source** —
+   the code-level workaround above should not be the permanent fix; the
+   `DriverProviderMapping` row itself should be corrected to hold the real
+   Samsara vehicle ID.
+3. **Visually verify the Heads-Up mobile layout** in Telegram or a real
+   browser — this phase's UI correctness was verified by tracing real
+   `/api/risk` responses against the rendering logic, not by screenshot (no
+   browser-automation tool was available in that session).
+
+---
+
+# Completed 2026-08-12: Phase 6B — Hybrid Pilot Observation Architecture
+
+Added a second, complementary historical record alongside `DriverEvent`
+("what happened"): `DriverObservation` ("what conditions existed at a
+point in time") — periodic baseline snapshots plus best-effort
+event-triggered context, for pilot drivers. Delivered incrementally as six
+sub-phases, each independently committed, validated against the real
+pilot fleet, and pushed to `main`:
+
+* **6B.1 — Schema.** New `DriverObservation` model: `triggerType`
+  (`"interval"` | `"safety_event"`), optional `driverEventId` (nullable
+  FK — Postgres treats multiple `NULL`s as non-conflicting under a unique
+  index, verified live), `observedAt`/`collectedAt` as two deliberately
+  separate timestamps, scalar projections
+  (`latitude`/`longitude`/`speedMph`/`hosShiftHoursUsed`/`weatherRisk`/`zoneRisk`)
+  for cheap querying, and a `contextJson` blob that reuses the *existing*
+  `VehicleLocation`/`WeatherDetail`/`HosDetail`/`ZoneDetail` provenance
+  types verbatim rather than inventing new provenance columns. RLS enabled
+  to match every other permanent domain table. Commit `d8aa198`.
+* **6B.2 — Collector.** `lib/driverContext/captureObservation.ts`:
+  `buildDriverObservationSnapshot()` / `captureDriverObservation()` /
+  `persistDriverObservationSnapshot()`, built by reusing the *same*
+  `assembleLocation`/`assembleWeather`/`assembleZoneRisk`/`assembleHos`/
+  `assembleSpeed` functions `/api/risk` already uses — no duplicate
+  provider clients. `observedAt`/`collectedAt` are always the collection
+  instant, never `DriverEvent.timestamp`. Manual dry-run/`--apply` CLI at
+  `scripts/captureDriverObservation.ts`. Commit `29b44c6`.
+* **6B.3 — Baseline scheduler (manual).** `GET /api/sync/driver-observations`
+  (`CRON_SECRET`-gated): one `triggerType: "interval"` capture per active
+  pilot driver, gated on (a) a 10-minute recency guard
+  (`BASELINE_INTERVAL_MS`, checked *before* any provider call) and (b) a
+  fresh-location requirement (stale/unavailable GPS → skipped, never
+  persisted with nulled fields). Commit `e8c8e0b`.
+* **6B.4 — Safety Event-triggered enrichment.** `syncSafetyEvents.ts` now
+  tracks `newDriverEventIds` (genuinely new rows only) and, strictly
+  *after* a successful drain, attempts one best-effort
+  `triggerType: "safety_event"` observation per new event via
+  `lib/driverContext/eventEnrichment.ts::enrichNewDriverEvents()` — reusing
+  the same 6B.2 collector, unconditionally (no location-freshness gate,
+  unlike baseline: event provenance is still useful even with a stale
+  current position). Enrichment failure never fails Safety Event
+  ingestion. Commit `91114d2`.
+* **6B.5 — Concurrency hardening.** Two gaps closed: (1)
+  `/api/sync/samsara-safety-events` used to call the sync function directly,
+  bypassing the on-demand path's DB lock — both now share one lock
+  (`lib/providers/samsara/syncLock.ts`). (2) Added
+  `@@unique([driverEventId, triggerType])` on `DriverObservation` (verified
+  live: existing `NULL`-`driverEventId` interval rows unaffected, a real
+  duplicate insert correctly rejected with `P2002`) and updated enrichment
+  to treat that specific race as `already_enriched`, not a failure — the DB
+  constraint, not the pre-check `findFirst`, is the actual source of truth.
+  Commit `3953a3d`.
+* **6B.6 — Combined cycle.** `lib/providerSyncLock.ts` generalizes the
+  Phase 6B.5 lock to any `(provider, streamKey)` pair (Safety Events lock
+  now a thin wrapper over it). `lib/driverContext/pilotObservationCycle.ts::
+  runPilotObservationCycle()`: a job-level lock
+  (`samsara`/`pilot-observation-cycle`, a separate row from the Safety
+  Events lock — two independent, non-blocking locks, so no deadlock is
+  possible) wraps Safety Events sync (via the shared lock) followed by
+  baseline collection, always attempted regardless of whether Safety
+  Events synced, was busy, or failed. Exposed at
+  `GET /api/sync/pilot-observation-cycle`. Commit `5ff2e2d`.
+
+**Scheduling: enabled as of Phase 6C (2026-08-20), via Supabase Cron —
+not Vercel Cron.** `vercel.json` remains untouched (still only the
+pre-existing daily `/api/inspect/cleanup` entry); the Hobby-plan
+sub-daily-cron limitation described in CLAUDE.md is sidestepped entirely
+by scheduling outside Vercel. See "Completed 2026-08-20: Phase 6C" below
+for full detail. The two individual routes
+(`/api/sync/samsara-safety-events`, `/api/sync/driver-observations`)
+remain manual/ops-only (`CRON_SECRET`) and are deliberately **not**
+scheduled independently — only the combined
+`/api/sync/pilot-observation-cycle` is.
+
+Combined architecture (once/if a scheduler is ever enabled, this is the
+only job that should be scheduled — not the two individual routes):
+
+```txt
+GET /api/sync/pilot-observation-cycle  [CRON_SECRET]
+        ↓
+withProviderSyncLock (job lock: samsara/pilot-observation-cycle)
+        ↓
+withSamsaraSyncLock (SAME shared lock /api/risk's on-demand path uses:
+                      samsara/safety-events)
+        ↓
+runSamsaraSafetyEventsSync → RawProviderEvent → DriverEvent
+        ↓
+enrichNewDriverEvents → DriverObservation(triggerType="safety_event")
+        ↓
+runBaselineObservationSync (10-min BASELINE_INTERVAL_MS guard,
+                             fresh-location gate)
+        ↓
+DriverObservation(triggerType="interval")
+```
+
+**What Phase 6B does NOT provide yet:** `RiskScoreHistory`, historical
+score trends, and incident-to-score linkage are not implemented —
+`ComplianceScore` remains the same coarse once-per-UTC-day snapshot it was
+before Phase 6B. XGBoost has not been started. Event-triggered
+`DriverObservation` rows represent *discovery-time* context
+(`observedAt`/`collectedAt`), never claimed to be event-time context — only
+`DriverEvent.timestamp`/`lat`/`lng` represent the actual moment of the
+event. Live-validated: `hosShiftHoursUsed` is currently `null` on every
+real captured row (this pilot driver has no active Samsara HOS clock) —
+correctly represented as unavailable, never fabricated.
+
+Git checkpoints:
+
+```txt
+d8aa198  feat: add driver observation schema (6B.1)
+29b44c6  feat: add driver observation collector (6B.2)
+e8c8e0b  feat: add manual baseline observation sync (6B.3)
+91114d2  feat: capture context for new safety events (6B.4)
+3953a3d  fix: harden observation sync concurrency (6B.5)
+5ff2e2d  feat: add hybrid pilot observation cycle (6B.6)
+```
+
+---
+
+# Completed 2026-08-20: Phase 6C — Automatic Hybrid Pilot Collection (Supabase Cron)
+
+Connected the already-built, already-tested Phase 6B.6 endpoint to a real
+scheduler. No application code changed — this was infrastructure only
+(Postgres extensions, Vault secrets, one `cron.job` row) against the same
+production Supabase project this app already uses.
+
+* **Production URL verified first, not assumed.** The Vercel MCP
+  integration's linked account only exposes an unrelated `baraka-market`
+  project (same gap noted in Phase 6B), so the host was instead confirmed
+  via GitHub's Deployments API (the latest deployment record for commit
+  `5ff2e2d` resolves to `https://safehaul.vercel.app`) and live HTTP
+  checks: `/` returns the real SafeHaul app, and
+  `GET /api/sync/pilot-observation-cycle` without auth returns `401` as
+  expected. The auto-generated team-scoped alias
+  (`safehaul-*-vercel.app`) redirects to Vercel SSO login and is **not**
+  usable by `pg_net` — `safehaul.vercel.app` is the correct target.
+* **Extensions enabled** on the production Supabase Postgres instance:
+  `pg_cron` 1.6.4, `pg_net` 0.20.0 (both were available but not yet
+  installed). `supabase_vault` 0.3.1 was already installed.
+* **Secrets in Vault, not SQL.** `vault.create_secret()` stores
+  `safehaul_cron_secret` (the app's existing `CRON_SECRET` — not rotated)
+  and `safehaul_production_base_url`. The cron job's SQL body reads both
+  via `vault.decrypted_secrets` at execution time; neither value is
+  hardcoded in the job definition.
+* **One job, one target.** `cron.schedule('safehaul-pilot-observation-cycle',
+  '*/10 * * * *', ...)` → `net.http_get()` against
+  `GET /api/sync/pilot-observation-cycle` with
+  `Authorization: Bearer <CRON_SECRET>`, `timeout_milliseconds := 55000`,
+  no retry logic (relies on pg_cron's normal next-tick behavior — the
+  route's own DB-backed locks and graceful failure handling from Phase 6B
+  are unchanged and still the sole concurrency mechanism). The two
+  individual sync routes were deliberately **not** scheduled.
+* **Validated end-to-end against production**, not simulated: one real
+  invocation surfaced 22 genuinely new `DriverEvent` rows (all
+  successfully enriched) and created 2 baseline `DriverObservation` rows
+  (the 2 active pilot drivers, both due). An immediate second invocation
+  correctly no-opped (`recent_observation` skip, 0 new driver events).
+  The exact stored cron command was then executed directly (pg_cron has
+  no SQL "run now"; this is what Supabase Dashboard's manual trigger
+  ultimately does) and `net._http_response` recorded `status_code: 200`
+  with the same idempotent result — proving the scheduler path
+  (Vault → `net.http_get` → production route) behaves identically to the
+  manually-tested Phase 6B.6 path, not just adjacent to it.
+* **Observability** without a new dashboard: `cron.job_run_details` (pg_cron's
+  run history), `net._http_response` (HTTP status/body/error per
+  invocation), `"ProviderSyncState".lastSyncAt`/`syncLockedAt` (is it
+  running / is it stuck), and `"DriverObservation".collectedAt` (data-level
+  confirmation) are all queryable directly against the existing
+  production database.
+
+No repository files changed in this phase (infrastructure only — see
+"Git status" note: `project_context.md` is the only tracked file
+modified, to document this work).
+
+---
+
 # Current Tech Stack
 
 Frontend:
@@ -225,7 +469,9 @@ Core models:
 * Trip
 * SafetyEvent
 * DriverEvent
+* DriverObservation (Phase 6B — periodic/event-triggered context snapshots, distinct from DriverEvent)
 * RawProviderEvent
+* ProviderSyncState (cursor + sync/job locks, keyed by provider+streamKey)
 * WebhookLog
 * ComplianceScore
 * Incident
@@ -314,11 +560,11 @@ DriverEvent DB rows
 Risk Engine
 ```
 
-**Caveat — `dataSource: "real"` currently overstates truthfulness.** Only
-safety events (harsh_braking, mobile_usage, etc.) are truly live for pilot
-drivers. HOS, speed, and zone risk are still mock inputs even for pilot
-drivers. See "Current Technical Debt" → "Data Truthfulness" below — this is
-the top priority for the next session.
+**Caveat — `dataSource: "real"` still overstates truthfulness, though less
+than before 2026-07-15.** Safety events and HOS are now truly live for
+pilot drivers (see "Completed 2026-07-15" above). Speed and zone risk are
+still mock inputs even for pilot drivers. See "Current Technical Debt" →
+"Data Truthfulness" below.
 
 ## Non-Pilot Drivers
 
@@ -353,7 +599,13 @@ Implemented:
 * normalized DriverEvent pipeline;
 * pilot-driver filtering;
 * hybrid real/mock risk engine integration;
-* Safety Events Stream polling (Phase 5A — see below).
+* Safety Events Stream polling (Phase 5A — see below);
+* hybrid pilot observation cycle — Safety Events sync + event-triggered and
+  baseline `DriverObservation` capture (Phase 6B — see "Completed
+  2026-08-12" above);
+* automatic scheduling of the hybrid cycle every 10 minutes via Supabase
+  Cron (`pg_cron`/`pg_net`/Vault) — not Vercel Cron (Phase 6C — see
+  "Completed 2026-08-20" above).
 
 Not yet implemented:
 
@@ -559,16 +811,33 @@ RLS is enabled/recommended for telemetry tables.
 
 ## Data Truthfulness (top priority — see "Next Development Priority" below)
 
-1. Pilot drivers still use mock HOS.
+1. ~~Pilot drivers still use mock HOS.~~ Real as of 2026-07-15 (see
+   "Completed 2026-07-15") — entry-level HOS fields remain unvalidated,
+   though (follow-up #1 below).
 2. Pilot drivers still use mock speed.
 3. Pilot drivers still use mock zone risk.
 4. Weather falls back to mock if unavailable.
-5. `dataSource` currently overstates "real" because only safety events are truly live.
+5. `dataSource` currently overstates "real" because speed/zone risk still
+   aren't sourced from a real provider, even though safety events and HOS
+   now are.
 6. Three `DriverEvent` types remain unscored by the risk engine:
    * `rolling_stop`
    * `following_distance`
    * `forward_collision_warning`
 7. `ComplianceScore` historical persistence still requires redesign.
+
+## Follow-ups from 2026-07-15 (Real HOS / Heads-Up Summary)
+
+8. Validate HOS entry-level fields (`clocks.drive`/`clocks.shift`,
+   `lastUpdatedAtTime`) against a real payload — the pilot driver had no
+   active clock during validation, so these remain unconfirmed guesses in
+   `lib/providers/samsara/hos.ts`.
+9. Correct the invalid `externalVehicleId` seed data at its source — the
+   pilot's `DriverProviderMapping` row holds the vehicle's display name
+   instead of its Samsara ID. `lib/todaySummary.ts` works around this
+   defensively but the row itself should be fixed.
+10. Visually verify the Heads-Up mobile layout in Telegram or a real
+    browser — not yet done with a screenshot/browser tool.
 
 ## High Priority
 
@@ -657,6 +926,39 @@ Git checkpoint:
 ```txt
 a690a6f
 ```
+
+---
+
+## Hybrid Pilot Observation Architecture (2026-08-12)
+
+Completed — see "Completed 2026-08-12: Phase 6B — Hybrid Pilot Observation
+Architecture" above for full detail. Six sub-phases (schema, collector,
+manual baseline route, Safety Event enrichment, concurrency hardening,
+combined cycle); scheduling intentionally not enabled at the time.
+
+Git checkpoints:
+
+```txt
+d8aa198
+29b44c6
+e8c8e0b
+91114d2
+3953a3d
+5ff2e2d
+```
+
+---
+
+## Automatic Hybrid Pilot Collection (2026-08-20)
+
+Completed — see "Completed 2026-08-20: Phase 6C — Automatic Hybrid Pilot
+Collection (Supabase Cron)" above for full detail. Infrastructure-only:
+enabled `pg_cron`/`pg_net` on the production Supabase Postgres instance,
+stored `CRON_SECRET` and the production base URL in Supabase Vault, and
+created one `cron.job` (`safehaul-pilot-observation-cycle`, every 10
+minutes) that calls `GET /api/sync/pilot-observation-cycle`. No repository
+code changed; `vercel.json` untouched. No git checkpoint — nothing was
+committed to the application codebase for this phase.
 
 ---
 
