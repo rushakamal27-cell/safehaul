@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { calculateRisk } from "@/lib/riskEngine";
+import { calculateRisk, resolveLevel } from "@/lib/riskEngine";
+import { nextRunningAverage } from "@/lib/complianceScoreAverage";
 import { getDriverVehicleContext } from "@/lib/samsara";
 import { isPilotDriver } from "@/lib/driverEvents";
 import { assembleDriverContext } from "@/lib/driverContext/assemble";
@@ -104,25 +105,55 @@ async function buildRiskResponse(driverId: string): Promise<NextResponse<RiskApi
     },
   });
 
-  // Persist one ComplianceScore row per driver per UTC calendar day.
-  // findFirst + conditional create avoids duplicates without a schema migration.
+  // Persist one ComplianceScore row per driver per UTC calendar day, whose
+  // `score` is a running arithmetic mean of every /api/risk calculation that
+  // day (see lib/complianceScoreAverage.ts) — not just the first. Race-safe
+  // without a large locking system: the day's first calculation always
+  // attempts a plain create(); every later calculation (that or any other
+  // concurrent request) hits the @@unique([driverId, date]) constraint,
+  // catches the P2002, and folds its score into the existing row inside a
+  // transaction that takes a Postgres row lock (`SELECT ... FOR UPDATE`)
+  // before computing the next average — so two concurrent requests can never
+  // both read the same pre-update state and silently drop one sample.
   const today = new Date();
   today.setUTCHours(0, 0, 0, 0);
 
-  const existing = await prisma.complianceScore.findFirst({
-    where: { driverId, date: today },
-    select: { id: true },
-  });
-
-  if (!existing) {
+  try {
     await prisma.complianceScore.create({
       data: {
         driverId,
         date:          today,
         score:         result.score,
+        sampleCount:   1,
         dangerLevel:   result.level,
         breakdownJson: result.factors as unknown as Prisma.InputJsonValue,
       },
+    });
+  } catch (err) {
+    const isUniqueConstraintViolation =
+      err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002";
+    if (!isUniqueConstraintViolation) throw err;
+
+    await prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<{ score: number; sampleCount: number }[]>`
+        SELECT score, "sampleCount" FROM "ComplianceScore"
+        WHERE "driverId" = ${driverId} AND date = ${today}
+        FOR UPDATE
+      `;
+      const current = rows[0];
+      // Row was just proven to exist by the P2002 above; nothing else
+      // deletes ComplianceScore rows. Defensive only.
+      if (!current) return;
+
+      const { average, sampleCount } = nextRunningAverage(current.score, current.sampleCount, result.score);
+      // breakdownJson intentionally left untouched here — it still reflects
+      // the day's first calculation's factor breakdown, same simplification
+      // this row already made before this change (single-snapshot, not an
+      // aggregate). Averaging per-factor breakdowns is out of scope.
+      await tx.complianceScore.update({
+        where: { driverId_date: { driverId, date: today } },
+        data:  { score: average, sampleCount, dangerLevel: resolveLevel(average) },
+      });
     });
   }
 

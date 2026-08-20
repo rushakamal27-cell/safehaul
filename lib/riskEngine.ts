@@ -485,7 +485,7 @@ function calculateContextualSpeedPenalty(input: RiskInput): ContextualSpeed {
 // Level thresholds
 // ---------------------------------------------------------------------------
 
-function resolveLevel(score: number): RiskLevel {
+export function resolveLevel(score: number): RiskLevel {
   if (score >= 75) return "LOW";
   if (score >= 50) return "MEDIUM";
   if (score >= 25) return "HIGH";

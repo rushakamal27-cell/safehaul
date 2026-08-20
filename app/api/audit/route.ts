@@ -2,18 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { getMockAuditEvents, AuditEvent } from "@/lib/audit";
 import { prisma } from "@/lib/prisma";
 import { isPilotDriver } from "@/lib/driverEvents";
-
-function formatAuditDate(date: Date): string {
-  return `📅 ${date
-    .toLocaleString("en-US", {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    })
-    .toUpperCase()}`;
-}
+import { formatAuditDate } from "@/lib/auditFormatting";
+import { buildComplianceScoreAuditItem, buildTripAuditItem } from "@/lib/auditItems";
 
 function formatEventType(raw: string): string {
   return raw.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
@@ -92,23 +82,7 @@ export async function GET(request: NextRequest) {
     };
   });
 
-  const complianceItems: Stamped[] = complianceScores.map((cs) => {
-    const badgeType: AuditEvent["badgeType"] =
-      cs.dangerLevel === "LOW" ? "pass" :
-      cs.dangerLevel === "MEDIUM" ? "warn" : "fail";
-    return {
-      ts: cs.date,
-      event: {
-        id: cs.id,
-        date: formatAuditDate(cs.date),
-        badge: `${cs.dangerLevel} RISK`,
-        badgeType,
-        title: "Daily Compliance Score",
-        detail: `Driver safety score: ${cs.score} out of 100`,
-        meta: [`📊 ${cs.score}/100`],
-      },
-    };
-  });
+  const complianceItems: Stamped[] = complianceScores.map(buildComplianceScoreAuditItem);
 
   // trip.weatherData is written fresh on every /api/risk call for the
   // driver's CURRENT pilot status (app/api/risk/route.ts's
@@ -119,33 +93,7 @@ export async function GET(request: NextRequest) {
   // "today" — a driver whose pilot status changed since a given trip could
   // see it mislabeled, but that's a narrow historical edge case, not the
   // common "is this Trip's data real" question this tag answers.
-  const tripItems: Stamped[] = trips.map((trip) => {
-    const weather = trip.weatherData as Record<string, any> | null;
-    const miles   = trip.milesDriven > 0 ? `${trip.milesDriven} mi` : null;
-    const loc     = weather?.locationLabel ?? null;
-    const zone    = weather?.zoneName      ?? null;
-    return {
-      ts: trip.startedAt,
-      event: {
-        id:        trip.id,
-        date:      formatAuditDate(trip.startedAt),
-        badge:     "TRIP",
-        badgeType: "info" as const,
-        title:     "Daily Trip",
-        detail:    [loc, zone].filter(Boolean).join(" · ") || "Trip logged. Location data not available.",
-        meta: [
-          ...(miles ? [`🛣 ${miles}`] : []),
-          ...(weather?.weatherRisk != null
-            ? [`🌦 Weather Risk ${Math.round(weather.weatherRisk * 100)}%`]
-            : []),
-          ...(weather?.zoneRisk != null
-            ? [`🗺 Area Risk ${Math.round(weather.zoneRisk * 100)}%`]
-            : []),
-          ...(!pilotDriver ? ["🧪 Demo Data"] : []),
-        ],
-      },
-    };
-  });
+  const tripItems: Stamped[] = trips.map((trip) => buildTripAuditItem(trip, pilotDriver));
 
   const inspectionItems: Stamped[] = inspections.map((ins) => {
     const badgeType: AuditEvent["badgeType"] =

@@ -15,7 +15,7 @@ import {
 function getTimelineIcon(badgeType: AuditEvent["badgeType"], title: string) {
   const props = { size: 15, strokeWidth: 1.75 };
   const lower = title.toLowerCase();
-  if (lower.includes("trip"))        return <Truck {...props} />;
+  if (lower.includes("trip") || lower.includes("driving")) return <Truck {...props} />;
   if (lower.includes("inspection"))  return <ClipboardCheck {...props} />;
   if (lower.includes("login") || lower.includes("driver login")) return <LogIn {...props} />;
   if (lower.includes("compliance") || lower.includes("score"))   return <CheckCircle2 {...props} />;

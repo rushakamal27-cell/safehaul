@@ -54,6 +54,12 @@ model Trip {
   milesDriven  Float         @default(0)
   weatherData  Json?
   createdAt    DateTime      @default(now())
+  /// When the displayed mileage/location/weather/zone snapshot was last
+  /// written — every /api/risk call for the day calls prisma.trip.update(),
+  /// so this always reflects the latest snapshot refresh, unlike startedAt
+  /// (which only reflects the day's first /api/risk call). Prisma sets this
+  /// automatically on every create()/update() — no application code needed.
+  updatedAt    DateTime      @default(now()) @updatedAt
   safetyEvents SafetyEvent[]
   incidents    Incident[]
   inspections  Inspection[]
@@ -74,15 +80,35 @@ model SafetyEvent {
   createdAt      DateTime @default(now())
 }
 
+/// One row per driver per UTC calendar day. `score` is a running arithmetic
+/// mean of every /api/risk calculation's result.score that UTC day (see
+/// lib/complianceScoreAverage.ts::nextRunningAverage) — no longer just the
+/// first calculation of the day. `date` remains the UTC-midnight day-bucket
+/// key (grouping only, never a calculation time); `updatedAt` is the actual
+/// timestamp of the most recent calculation folded into the average.
 model ComplianceScore {
   id            String   @id @default(cuid())
   driverId      String
   driver        Driver   @relation(fields: [driverId], references: [id])
   date          DateTime
-  score         Int
+  /// Running arithmetic mean of result.score across the UTC day (Float, not
+  /// rounded on write — only rounded for display). For pre-existing rows
+  /// (sampleCount backfilled to 1), this is exactly the single frozen score
+  /// they always held — a 1-sample average equals that sample.
+  score         Float
+  /// How many /api/risk calculations are folded into `score`. Existing rows
+  /// backfilled to 1 (accurate: those rows always held exactly one frozen
+  /// calculation, never a real average).
+  sampleCount   Int      @default(1)
   breakdownJson Json?
   dangerLevel   String
   createdAt     DateTime @default(now())
+  /// Time of the most recent /api/risk calculation folded into `score` —
+  /// equals createdAt for a day's first calculation, advances on every
+  /// subsequent same-day calculation. Use this for display, never `date`.
+  updatedAt     DateTime @default(now()) @updatedAt
+
+  @@unique([driverId, date])
 }
 
 model Incident {
