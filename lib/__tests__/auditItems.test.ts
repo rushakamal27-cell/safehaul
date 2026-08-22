@@ -1,6 +1,11 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { buildComplianceScoreAuditItem, buildTripAuditItem } from "../auditItems";
+import {
+  buildComplianceScoreAuditItem,
+  buildTripAuditItem,
+  buildDailySafetyScoreAuditItem,
+  buildDailyDrivingSummaryAuditItem,
+} from "../auditItems";
 
 describe("buildComplianceScoreAuditItem", () => {
   test("title is 'Daily Safety Score', not 'Daily Compliance Score'", () => {
@@ -101,5 +106,100 @@ describe("buildTripAuditItem", () => {
       true
     );
     assert.ok(!event.meta.includes("🧪 Demo Data"));
+  });
+});
+
+describe("buildDailySafetyScoreAuditItem", () => {
+  test("title is 'Daily Safety Score', same as the legacy mapping", () => {
+    const { event } = buildDailySafetyScoreAuditItem({
+      id: "dss_1", averageScore: 93, sampleCount: 22, expectedSampleCount: 24,
+      dangerLevel: "LOW", finalizedAt: new Date("2026-08-23T00:10:00.000Z"),
+    });
+    assert.equal(event.title, "Daily Safety Score");
+  });
+
+  test("shows the real sample count, not the expected count, and never implies 22/22 or 24/24", () => {
+    const { event } = buildDailySafetyScoreAuditItem({
+      id: "dss_1", averageScore: 93, sampleCount: 22, expectedSampleCount: 24,
+      dangerLevel: "LOW", finalizedAt: new Date(),
+    });
+    assert.ok(event.meta.includes("22 of 24 hourly samples"));
+  });
+
+  test("displayed timestamp is finalizedAt, not the UTC-day bucket key", () => {
+    const finalizedAt = new Date("2026-08-23T00:10:00.000Z");
+    const { ts, event } = buildDailySafetyScoreAuditItem({
+      id: "dss_1", averageScore: 93, sampleCount: 24, expectedSampleCount: 24,
+      dangerLevel: "LOW", finalizedAt,
+    });
+    assert.equal(ts, finalizedAt);
+    assert.match(event.date, /12:10 AM/);
+  });
+
+  test("rounds the average for display only", () => {
+    const { event } = buildDailySafetyScoreAuditItem({
+      id: "dss_1", averageScore: 92.666, sampleCount: 3, expectedSampleCount: 24,
+      dangerLevel: "LOW", finalizedAt: new Date(),
+    });
+    assert.equal(event.detail, "Average safety score: 93 out of 100");
+  });
+
+  test("badgeType follows dangerLevel", () => {
+    const high = buildDailySafetyScoreAuditItem({
+      id: "dss_1", averageScore: 20, sampleCount: 10, expectedSampleCount: 24,
+      dangerLevel: "HIGH", finalizedAt: new Date(),
+    });
+    assert.equal(high.event.badgeType, "fail");
+  });
+});
+
+describe("buildDailyDrivingSummaryAuditItem", () => {
+  test("title is 'Daily Driving Summary', same as the legacy mapping", () => {
+    const { event } = buildDailyDrivingSummaryAuditItem({
+      id: "dds_1", startLocationLabel: "Philadelphia, PA", endLocationLabel: "LaPorte County, IN",
+      routeSpanAvailable: true, milesDriven: 705, weatherRiskAvg: 0.12, zoneRiskAvg: 0.08,
+      finalizedAt: new Date(),
+    });
+    assert.equal(event.title, "Daily Driving Summary");
+  });
+
+  test("detail is 'start → end' when a route span is available", () => {
+    const { event } = buildDailyDrivingSummaryAuditItem({
+      id: "dds_1", startLocationLabel: "Philadelphia, PA", endLocationLabel: "LaPorte County, IN",
+      routeSpanAvailable: true, milesDriven: 705, weatherRiskAvg: 0.12, zoneRiskAvg: 0.08,
+      finalizedAt: new Date(),
+    });
+    assert.equal(event.detail, "Philadelphia, PA → LaPorte County, IN");
+  });
+
+  test("no-movement day: routeSpanAvailable false yields an honest unavailable message, never a fabricated origin/destination", () => {
+    const { event } = buildDailyDrivingSummaryAuditItem({
+      id: "dds_1", startLocationLabel: null, endLocationLabel: null,
+      routeSpanAvailable: false, milesDriven: null, weatherRiskAvg: null, zoneRiskAvg: null,
+      finalizedAt: new Date(),
+    });
+    assert.match(event.detail, /unavailable/i);
+    assert.deepEqual(event.meta, []);
+  });
+
+  test("mileage unavailable is omitted from meta, never shown as 0", () => {
+    const { event } = buildDailyDrivingSummaryAuditItem({
+      id: "dds_1", startLocationLabel: "A", endLocationLabel: "B",
+      routeSpanAvailable: true, milesDriven: null, weatherRiskAvg: 0.1, zoneRiskAvg: null,
+      finalizedAt: new Date(),
+    });
+    assert.ok(!event.meta.some((m) => m.startsWith("🛣")));
+    assert.ok(event.meta.includes("🌦 Weather Risk 10%"));
+  });
+
+  test("weather/zone risk averages render as rounded percentages", () => {
+    const { event } = buildDailyDrivingSummaryAuditItem({
+      id: "dds_1", startLocationLabel: "A", endLocationLabel: "B",
+      routeSpanAvailable: true, milesDriven: 705, weatherRiskAvg: 0.12, zoneRiskAvg: 0.08,
+      finalizedAt: new Date(),
+    });
+    assert.ok(event.meta.includes("🛣 705 mi"));
+    assert.ok(event.meta.includes("🌦 Weather Risk 12%"));
+    assert.ok(event.meta.includes("🗺 Area Risk 8%"));
   });
 });

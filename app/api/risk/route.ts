@@ -11,6 +11,7 @@ import { fetchTodaySummaryData } from "@/lib/todaySummary";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@/lib/generated/prisma";
 import { getOrCreateTodayTrip } from "@/lib/trip";
+import { shouldPersistDailyHistory } from "@/lib/riskPersistence";
 import type { ApiErrorResponse } from "@/lib/api/common";
 import type { RiskApiResponse } from "@/lib/api/risk";
 
@@ -49,11 +50,26 @@ export async function GET(request: NextRequest): Promise<NextResponse<RiskApiRes
 
 async function buildRiskResponse(driverId: string): Promise<NextResponse<RiskApiResponse>> {
   const pilotDriver = await isPilotDriver(driverId);
+  // Single source of truth for "may this call write daily historical Audit
+  // records" — see lib/riskPersistence.ts. False for pilot drivers: their
+  // history is now owned exclusively by the autonomous
+  // lib/riskSampling/ pipeline (hourly SafetyScoreSample -> daily
+  // DailySafetyScore/DailyDrivingSummary), never by this route. True for
+  // demo (non-pilot) drivers, who have no autonomous collection pipeline —
+  // Trip/ComplianceScore remain their only history source, unchanged from
+  // before this correction.
+  const persistDailyHistory = shouldPersistDailyHistory(pilotDriver);
 
+  // getOrCreateTodayTrip is only needed for the demo (non-pilot) SafetyEvent
+  // write below — a pilot driver must not get a Trip row created just from
+  // opening the dashboard (that's exactly the app-open-creates-history
+  // pattern this correction removes). /api/incident and /api/inspect still
+  // call getOrCreateTodayTrip independently for real driver-initiated
+  // events, for any driver — that is unaffected by this change.
   const [assembled, vehicle, tripId, summaryData] = await Promise.all([
     assembleDriverContext(driverId, pilotDriver),
     getDriverVehicleContext(driverId),
-    getOrCreateTodayTrip(driverId),
+    persistDailyHistory ? getOrCreateTodayTrip(driverId) : Promise.resolve(null),
     fetchTodaySummaryData(driverId, pilotDriver),
   ]);
 
@@ -65,120 +81,106 @@ async function buildRiskResponse(driverId: string): Promise<NextResponse<RiskApi
   const result = calculateRisk(input);
   const alertsActive = result.factors.length;
 
-  // Stamp current mileage and environmental snapshot on the active trip.
-  // Both are updated on every call — mileage accumulates, conditions change.
-  //
-  // `vehicle` (getDriverVehicleContext) is still 100% mock scenario data —
-  // it remains the source for demo drivers here. For pilots, every field in
-  // this snapshot is now real (or null when unavailable): weatherRisk/
-  // locationLabel since Phase 2, zoneRisk/zoneName since Phase 3
-  // (zoneDetail). This Trip.weatherData blob is surfaced verbatim in the
-  // Audit view (app/api/audit/route.ts's "Daily Trip" entries) — letting it
-  // keep showing mock data for a pilot here would silently reintroduce the
-  // exact "real-looking but wrong" problem Phase 2 exists to fix, even
-  // though DriverContext itself is now correct.
-  const weatherDataSnapshot = pilotDriver
-    ? {
-        weatherRisk:   weatherDetail.weatherRisk,      // real (or null when unavailable) — never the mock scenario value for a pilot
-        zoneRisk:      zoneDetail.zoneRisk,             // real (or null when unavailable) — never the mock scenario value for a pilot
-        locationLabel: locationDetail.formattedLocation, // real reverse-geo (or null) — never the mock scenario label for a pilot
-        zoneName:      zoneDetail.zoneName,             // real (or null) — never the mock scenario name for a pilot
-      }
-    : {
-        weatherRisk:   vehicle.weatherRisk,
-        zoneRisk:      vehicle.zoneRisk,
-        locationLabel: vehicle.locationLabel,
-        zoneName:      vehicle.zoneName,
-      };
-
-  // milesDriven: same real-per-pilot source as todaySummary.milesDriven below
-  // (summaryData, from fetchTodaySummaryData) — previously this used a
-  // separate mock-only getDriverDailySummary() call, so the persisted Trip
-  // row silently disagreed with the real value shown in the API response.
-  // When the real value is unavailable, the field is omitted rather than
-  // written as a fabricated 0, preserving the last known real mileage.
-  await prisma.trip.update({
-    where: { id: tripId },
-    data:  {
-      ...(summaryData.milesDriven !== null ? { milesDriven: summaryData.milesDriven } : {}),
-      weatherData: weatherDataSnapshot,
-    },
-  });
-
-  // Persist one ComplianceScore row per driver per UTC calendar day, whose
-  // `score` is a running arithmetic mean of every /api/risk calculation that
-  // day (see lib/complianceScoreAverage.ts) — not just the first. Race-safe
-  // without a large locking system: the day's first calculation always
-  // attempts a plain create(); every later calculation (that or any other
-  // concurrent request) hits the @@unique([driverId, date]) constraint,
-  // catches the P2002, and folds its score into the existing row inside a
-  // transaction that takes a Postgres row lock (`SELECT ... FOR UPDATE`)
-  // before computing the next average — so two concurrent requests can never
-  // both read the same pre-update state and silently drop one sample.
   const today = new Date();
   today.setUTCHours(0, 0, 0, 0);
 
-  try {
-    await prisma.complianceScore.create({
-      data: {
-        driverId,
-        date:          today,
-        score:         result.score,
-        sampleCount:   1,
-        dangerLevel:   result.level,
-        breakdownJson: result.factors as unknown as Prisma.InputJsonValue,
+  if (persistDailyHistory) {
+    // Demo (non-pilot) only, from here through the SafetyEvent write below.
+    // `tripId`/`today` are guaranteed non-null/defined in this branch —
+    // persistDailyHistory is exactly the condition getOrCreateTodayTrip
+    // above was called under.
+
+    // Stamp current mileage and environmental snapshot on the active trip.
+    // Updated on every call — mileage accumulates, conditions change.
+    // `vehicle` (getDriverVehicleContext) is 100% mock scenario data for a
+    // demo driver, the only case this branch runs under.
+    await prisma.trip.update({
+      where: { id: tripId! },
+      data:  {
+        ...(summaryData.milesDriven !== null ? { milesDriven: summaryData.milesDriven } : {}),
+        weatherData: {
+          weatherRisk:   vehicle.weatherRisk,
+          zoneRisk:      vehicle.zoneRisk,
+          locationLabel: vehicle.locationLabel,
+          zoneName:      vehicle.zoneName,
+        },
       },
     });
-  } catch (err) {
-    const isUniqueConstraintViolation =
-      err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002";
-    if (!isUniqueConstraintViolation) throw err;
 
-    await prisma.$transaction(async (tx) => {
-      const rows = await tx.$queryRaw<{ score: number; sampleCount: number }[]>`
-        SELECT score, "sampleCount" FROM "ComplianceScore"
-        WHERE "driverId" = ${driverId} AND date = ${today}
-        FOR UPDATE
-      `;
-      const current = rows[0];
-      // Row was just proven to exist by the P2002 above; nothing else
-      // deletes ComplianceScore rows. Defensive only.
-      if (!current) return;
-
-      const { average, sampleCount } = nextRunningAverage(current.score, current.sampleCount, result.score);
-      // breakdownJson intentionally left untouched here — it still reflects
-      // the day's first calculation's factor breakdown, same simplification
-      // this row already made before this change (single-snapshot, not an
-      // aggregate). Averaging per-factor breakdowns is out of scope.
-      await tx.complianceScore.update({
-        where: { driverId_date: { driverId, date: today } },
-        data:  { score: average, sampleCount, dangerLevel: resolveLevel(average) },
-      });
-    });
-  }
-
-  // Persist today's safety events for non-pilot drivers only.
-  // Pilot drivers: real events live in DriverEvent (via webhook pipeline) — no duplication.
-  // Guard prevents re-writing identical scenario events on repeated refreshes.
-  if (!pilotDriver && input.safetyEvents.length > 0) {
-    const existingEvent = await prisma.safetyEvent.findFirst({
-      where: { driverId, timestamp: { gte: today } },
-      select: { id: true },
-    });
-
-    if (!existingEvent) {
-      const now = new Date();
-      await prisma.safetyEvent.createMany({
-        data: input.safetyEvents.map((ev) => ({
+    // Persist one ComplianceScore row per driver per UTC calendar day, whose
+    // `score` is a running arithmetic mean of every /api/risk calculation
+    // that day (see lib/complianceScoreAverage.ts) — not just the first.
+    // Race-safe without a large locking system: the day's first calculation
+    // always attempts a plain create(); every later calculation (that or any
+    // other concurrent request) hits the @@unique([driverId, date])
+    // constraint, catches the P2002, and folds its score into the existing
+    // row inside a transaction that takes a Postgres row lock
+    // (`SELECT ... FOR UPDATE`) before computing the next average — so two
+    // concurrent requests can never both read the same pre-update state and
+    // silently drop one sample.
+    try {
+      await prisma.complianceScore.create({
+        data: {
           driverId,
-          tripId,
-          eventType: ev.type,
-          severity:  String(ev.severity),
-          timestamp: now,
-          lat:       vehicle.lat,
-          lng:       vehicle.lng,
-        })),
+          date:          today,
+          score:         result.score,
+          sampleCount:   1,
+          dangerLevel:   result.level,
+          breakdownJson: result.factors as unknown as Prisma.InputJsonValue,
+        },
       });
+    } catch (err) {
+      const isUniqueConstraintViolation =
+        err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002";
+      if (!isUniqueConstraintViolation) throw err;
+
+      await prisma.$transaction(async (tx) => {
+        const rows = await tx.$queryRaw<{ score: number; sampleCount: number }[]>`
+          SELECT score, "sampleCount" FROM "ComplianceScore"
+          WHERE "driverId" = ${driverId} AND date = ${today}
+          FOR UPDATE
+        `;
+        const current = rows[0];
+        // Row was just proven to exist by the P2002 above; nothing else
+        // deletes ComplianceScore rows. Defensive only.
+        if (!current) return;
+
+        const { average, sampleCount } = nextRunningAverage(current.score, current.sampleCount, result.score);
+        // breakdownJson intentionally left untouched here — it still
+        // reflects the day's first calculation's factor breakdown, same
+        // simplification this row already made before this change
+        // (single-snapshot, not an aggregate). Averaging per-factor
+        // breakdowns is out of scope.
+        await tx.complianceScore.update({
+          where: { driverId_date: { driverId, date: today } },
+          data:  { score: average, sampleCount, dangerLevel: resolveLevel(average) },
+        });
+      });
+    }
+
+    // Persist today's safety events for non-pilot drivers only.
+    // Pilot drivers: real events live in DriverEvent (via webhook pipeline) — no duplication.
+    // Guard prevents re-writing identical scenario events on repeated refreshes.
+    if (input.safetyEvents.length > 0) {
+      const existingEvent = await prisma.safetyEvent.findFirst({
+        where: { driverId, timestamp: { gte: today } },
+        select: { id: true },
+      });
+
+      if (!existingEvent) {
+        const now = new Date();
+        await prisma.safetyEvent.createMany({
+          data: input.safetyEvents.map((ev) => ({
+            driverId,
+            tripId: tripId!,
+            eventType: ev.type,
+            severity:  String(ev.severity),
+            timestamp: now,
+            lat:       vehicle.lat,
+            lng:       vehicle.lng,
+          })),
+        });
+      }
     }
   }
 

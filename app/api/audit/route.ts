@@ -3,7 +3,13 @@ import { getMockAuditEvents, AuditEvent } from "@/lib/audit";
 import { prisma } from "@/lib/prisma";
 import { isPilotDriver } from "@/lib/driverEvents";
 import { formatAuditDate } from "@/lib/auditFormatting";
-import { buildComplianceScoreAuditItem, buildTripAuditItem } from "@/lib/auditItems";
+import {
+  buildComplianceScoreAuditItem,
+  buildTripAuditItem,
+  buildDailySafetyScoreAuditItem,
+  buildDailyDrivingSummaryAuditItem,
+} from "@/lib/auditItems";
+import { utcDayKey } from "@/lib/riskSampling/dayBounds";
 
 function formatEventType(raw: string): string {
   return raw.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
@@ -20,7 +26,10 @@ export async function GET(request: NextRequest) {
   }
 
   // Fetch all real event tables in parallel
-  const [pilotDriver, incidents, safetyEvents, complianceScores, trips, inspections, driverEventsRaw] = await Promise.all([
+  const [
+    pilotDriver, incidents, safetyEvents, complianceScores, trips, inspections, driverEventsRaw,
+    dailySafetyScores, dailyDrivingSummaries,
+  ] = await Promise.all([
     isPilotDriver(driverId),
     prisma.incident.findMany({ where: { driverId }, orderBy: { createdAt: "desc" } }),
     prisma.safetyEvent.findMany({ where: { driverId }, orderBy: { timestamp: "desc" } }),
@@ -32,6 +41,10 @@ export async function GET(request: NextRequest) {
       orderBy: { timestamp: "desc" },
       include: { rawProviderEvent: { select: { source: true } } },
     }),
+    // Autonomous, post-factum finalized history (lib/riskSampling/) — only
+    // ever populated for pilot driverIds; empty for demo drivers.
+    prisma.dailySafetyScore.findMany({ where: { driverId }, orderBy: { date: "desc" } }),
+    prisma.dailyDrivingSummary.findMany({ where: { driverId }, orderBy: { date: "desc" } }),
   ]);
 
   // Intermediate type for unified sort before stripping timestamp
@@ -82,7 +95,23 @@ export async function GET(request: NextRequest) {
     };
   });
 
-  const complianceItems: Stamped[] = complianceScores.map(buildComplianceScoreAuditItem);
+  // Legacy-transition dedup (Part 10): /api/risk stopped writing new
+  // ComplianceScore/Trip rows for pilot drivers on cutover — see
+  // lib/riskPersistence.ts — but a driver who opened the app on the
+  // cutover's own UTC day may already have a partial legacy row for that
+  // same day, which the autonomous finalizer will ALSO produce a
+  // DailySafetyScore/DailyDrivingSummary row for once that day ends. Rather
+  // than show both for one day, the new finalized row always wins — a
+  // deterministic rule keyed on UTC day, applied per model independently
+  // (a day could in principle finalize one but not the other). Every
+  // legacy row from before the cutover has no corresponding new-model row
+  // at all and is therefore never affected by this filter.
+  const finalizedScoreDays = new Set(dailySafetyScores.map((dss) => utcDayKey(dss.date)));
+  const finalizedSummaryDays = new Set(dailyDrivingSummaries.map((dds) => utcDayKey(dds.date)));
+
+  const complianceItems: Stamped[] = complianceScores
+    .filter((cs) => !finalizedScoreDays.has(utcDayKey(cs.date)))
+    .map(buildComplianceScoreAuditItem);
 
   // trip.weatherData is written fresh on every /api/risk call for the
   // driver's CURRENT pilot status (app/api/risk/route.ts's
@@ -93,7 +122,12 @@ export async function GET(request: NextRequest) {
   // "today" — a driver whose pilot status changed since a given trip could
   // see it mislabeled, but that's a narrow historical edge case, not the
   // common "is this Trip's data real" question this tag answers.
-  const tripItems: Stamped[] = trips.map((trip) => buildTripAuditItem(trip, pilotDriver));
+  const tripItems: Stamped[] = trips
+    .filter((trip) => !finalizedSummaryDays.has(utcDayKey(trip.startedAt)))
+    .map((trip) => buildTripAuditItem(trip, pilotDriver));
+
+  const dailySafetyScoreItems: Stamped[] = dailySafetyScores.map(buildDailySafetyScoreAuditItem);
+  const dailyDrivingSummaryItems: Stamped[] = dailyDrivingSummaries.map(buildDailyDrivingSummaryAuditItem);
 
   const inspectionItems: Stamped[] = inspections.map((ins) => {
     const badgeType: AuditEvent["badgeType"] =
@@ -152,6 +186,8 @@ export async function GET(request: NextRequest) {
     ...safetyItems,
     ...complianceItems,
     ...tripItems,
+    ...dailySafetyScoreItems,
+    ...dailyDrivingSummaryItems,
     ...inspectionItems,
     ...driverEventItems,
   ]

@@ -43,6 +43,9 @@ model Driver {
   driverEvents       DriverEvent[]
   legalAcceptances   LegalAcceptance[]
   driverObservations DriverObservation[]
+  safetyScoreSamples SafetyScoreSample[]
+  dailySafetyScores  DailySafetyScore[]
+  dailyDrivingSummaries DailyDrivingSummary[]
 }
 
 model Trip {
@@ -393,6 +396,127 @@ model DriverObservation {
   @@unique([driverEventId, triggerType])
   @@index([driverId, observedAt])
   @@index([driverEventId])
+}
+
+// ---------------------------------------------------------------------------
+// Derived risk history (autonomous, post-factum) — replaces app-open-driven
+// Trip/ComplianceScore as the Audit history source for pilot drivers going
+// forward. See lib/riskSampling/ for the collectors that write these.
+// ---------------------------------------------------------------------------
+
+/// One derived risk snapshot per driver per UTC clock hour ("what did the
+/// SafeHaul risk engine estimate around this hour" — Part 11's ownership
+/// doc). Written by lib/riskSampling/hourlyScoreSampling.ts, on an
+/// autonomous ~hourly Supabase Cron job — never by /api/risk or any
+/// app-open path. `hourBucket` is always UTC-hour-aligned (minutes/seconds/
+/// ms zeroed); the @@unique constraint is the sole source of truth for "at
+/// most one sample per driver per hour" — a second attempt for the same
+/// hour is a no-op (see hourlyScoreSampling.ts's P2002 handling), never an
+/// overwrite or an average-fold (unlike ComplianceScore's running mean).
+/// `score`/`dangerLevel` come from the SAME calculateRisk()/resolveLevel()
+/// used by /api/risk and the (now-legacy) ComplianceScore — no separate
+/// scoring formula. `contextStatus` (full_live/partial_live/demo) and
+/// `breakdownJson` preserve enough provenance to know, after the fact,
+/// whether this hour's context was complete — reusing the existing
+/// lib/driverContext/contextStatus.ts + toContextSources.ts vocabulary
+/// rather than inventing a new one.
+model SafetyScoreSample {
+  id            String   @id @default(cuid())
+  driverId      String
+  driver        Driver   @relation(fields: [driverId], references: [id])
+  hourBucket    DateTime
+  score         Float
+  dangerLevel   String
+  contextStatus String
+  breakdownJson Json?
+  /// Wall-clock instant the sample was actually computed — distinct from
+  /// hourBucket (the slot it represents), same distinction DriverObservation
+  /// draws between observedAt and collectedAt.
+  sampledAt     DateTime
+  createdAt     DateTime @default(now())
+
+  @@unique([driverId, hourBucket])
+  @@index([driverId, hourBucket])
+}
+
+/// Finalized daily aggregate — one row per driver per UTC calendar day,
+/// created shortly after the day ends by lib/riskSampling/dailyFinalization.ts
+/// from that day's SafetyScoreSample rows. `averageScore` is the arithmetic
+/// mean of exactly `sampleCount` valid hourly samples — NEVER divided by
+/// `expectedSampleCount` (24); a day with 21 valid samples divides by 21,
+/// never 24, and a missing hour is simply absent from the average, never
+/// counted as a zero. Immutable once created: finalization uses an atomic
+/// create() and treats the unique-constraint violation from a rerun as
+/// "already finalized, skip" — never an update — so a scheduler retrigger
+/// can never silently change a day's finalized history.
+model DailySafetyScore {
+  id                  String   @id @default(cuid())
+  driverId            String
+  driver              Driver   @relation(fields: [driverId], references: [id])
+  date                DateTime
+  averageScore        Float
+  /// How many valid SafetyScoreSample rows this average is over — the real
+  /// denominator, always. See the model comment above.
+  sampleCount         Int
+  /// Informational only (nominally 24) — the number of hourly slots the day
+  /// COULD have had, never used as the averaging denominator.
+  expectedSampleCount Int
+  dangerLevel         String
+  finalizedAt         DateTime @default(now())
+  createdAt           DateTime @default(now())
+
+  @@unique([driverId, date])
+}
+
+/// Finalized daily observed-route-span + mileage/weather/zone summary — one
+/// row per driver per UTC calendar day, created alongside DailySafetyScore
+/// by the same finalization job, from that day's DriverObservation rows (and
+/// real Samsara odometer history for mileage). This is NOT a Samsara "trip,"
+/// not one freight load, and not a reconstruction of stop-by-stop
+/// chronology — it only answers "where did the observed driving day begin
+/// and end," using the earliest/latest DriverObservation showing genuine
+/// movement that day (see lib/riskSampling/routeSpan.ts's movement
+/// threshold). `routeSpanAvailable` is false (start/end all null) when no
+/// defensible moving-or-fresh-GPS observation exists for the day — never a
+/// fabricated origin/destination. `milesDriven`/`weatherRiskAvg`/
+/// `zoneRiskAvg` are independently nullable — each is only populated when
+/// its own underlying data was actually available that day; a missing input
+/// is omitted, never defaulted to 0. Immutable once created, same
+/// create()-then-skip-on-conflict idempotency as DailySafetyScore.
+model DailyDrivingSummary {
+  id                 String    @id @default(cuid())
+  driverId           String
+  driver             Driver    @relation(fields: [driverId], references: [id])
+  date               DateTime
+  startLatitude      Float?
+  startLongitude     Float?
+  startLocationLabel String?
+  startObservedAt    DateTime?
+  endLatitude        Float?
+  endLongitude       Float?
+  endLocationLabel   String?
+  endObservedAt      DateTime?
+  /// False when no moving-or-fresh-GPS DriverObservation existed for the
+  /// day — the honest "we cannot defend a route span for this day" case.
+  /// All six start-/end-prefixed fields above are null together whenever
+  /// this is false; never partially populated.
+  routeSpanAvailable Boolean   @default(false)
+  /// Real Samsara Vehicle Statistics History odometer delta for the UTC
+  /// day, same source/method as lib/todaySummary.ts. Null (never 0) when
+  /// provider mileage genuinely could not be obtained that day.
+  milesDriven        Float?
+  /// Arithmetic mean of DriverObservation.weatherRisk over the day's valid
+  /// (non-null) readings — null (never 0) when no valid reading existed.
+  weatherRiskAvg     Float?
+  weatherSampleCount Int       @default(0)
+  /// Arithmetic mean of DriverObservation.zoneRisk over the day's valid
+  /// (non-null) readings — null (never 0) when no valid reading existed.
+  zoneRiskAvg        Float?
+  zoneSampleCount    Int       @default(0)
+  finalizedAt        DateTime  @default(now())
+  createdAt          DateTime  @default(now())
+
+  @@unique([driverId, date])
 }
 
 // ---------------------------------------------------------------------------
