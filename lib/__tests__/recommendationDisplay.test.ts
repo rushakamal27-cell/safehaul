@@ -127,4 +127,42 @@ describe("classifyRecommendation", () => {
       assert.equal(classifyRecommendation("Something entirely unrelated.").category, "advisory");
     });
   });
+
+  // Localization (2026-08-27) — classification stays keyed on the English
+  // `rec` text regardless of `language`; only the returned title changes.
+  describe("language parameter (localization)", () => {
+    test("default (no language arg) is unaffected — still English titles", () => {
+      assert.deepEqual(
+        classifyRecommendation("Consider a rest break soon."),
+        { category: "fatigue", title: "Fatigue" }
+      );
+    });
+
+    test("language: 'en' explicitly is identical to the default", () => {
+      assert.deepEqual(
+        classifyRecommendation("Consider a rest break soon.", "en"),
+        { category: "fatigue", title: "Fatigue" }
+      );
+    });
+
+    test("language: 'ru' translates the title but keeps the same category", () => {
+      assert.deepEqual(
+        classifyRecommendation("Consider a rest break soon.", "ru"),
+        { category: "fatigue", title: "Усталость" }
+      );
+    });
+
+    test("classification (category) is identical across languages — only the title differs", () => {
+      const rec = "Come to a complete stop at stop signs and red lights.";
+      assert.equal(classifyRecommendation(rec, "en").category, classifyRecommendation(rec, "ru").category);
+      assert.equal(classifyRecommendation(rec, "ru").title, "Дорожные знаки");
+    });
+
+    test("ru advisory fallback for an unmatched message", () => {
+      assert.deepEqual(
+        classifyRecommendation("Something entirely unrelated.", "ru"),
+        { category: "advisory", title: "Рекомендация" }
+      );
+    });
+  });
 });

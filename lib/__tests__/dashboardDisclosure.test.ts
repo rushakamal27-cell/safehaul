@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   safetyEventsStatusPhrase,
   buildPartialLiveDisclosure,
+  fieldStatusPhrase,
   type FieldMeta,
   type SafetyEventsSyncInfo,
 } from "../dashboardDisclosure";
@@ -146,5 +147,64 @@ describe("buildPartialLiveDisclosure — safety events integration", () => {
     assert.match(disclosure, /^Safety events: Synced 1 min ago \(Samsara\)\./, "safety events phrase must lead the disclosure, using sync recency");
     assert.doesNotMatch(disclosure, /Safety events:.*1440 min old/, "must never use the 24h-old event's age for safety events");
     assert.match(disclosure, /HOS: Cached \(Samsara, 30 min old\)\./, "other fields still use their own observedAt-based wording, unchanged");
+  });
+});
+
+// Localization (2026-08-27) — `language` is additive/optional; every test
+// above (no language arg) must keep passing unmodified, verified by the
+// full suite still being green. These cover the new "ru" path specifically.
+describe("language parameter (localization)", () => {
+  test("safetyEventsStatusPhrase: 'ru' translates the sentence, keeps the brand name (Samsara) untranslated", () => {
+    const meta = cachedSafetyEventsMeta("2026-08-05T06:00:00.000Z");
+    const liveData: SafetyEventsSyncInfo = { lastSyncTime: "2026-08-05T11:58:00.000Z" };
+
+    const phrase = safetyEventsStatusPhrase(meta, liveData, NOW, "ru");
+
+    assert.equal(phrase, "События безопасности: синхронизировано 2 мин назад (Samsara).");
+  });
+
+  test("safetyEventsStatusPhrase: 'ru' demo wording", () => {
+    const meta = demoSafetyEventsMeta("2026-08-05T12:00:00.000Z");
+    const phrase = safetyEventsStatusPhrase(meta, null, NOW, "ru");
+    assert.equal(phrase, "События безопасности: демо-данные.");
+  });
+
+  test("fieldStatusPhrase: 'ru' live/cached/unavailable wording, provider untranslated", () => {
+    const live: FieldMeta = { origin: "observed", state: "fresh", provider: "samsara", observedAt: "2026-08-05T11:59:00.000Z" };
+    assert.equal(fieldStatusPhrase("Weather", live, NOW, "ru"), "Погода: в реальном времени (Samsara).");
+
+    const cached: FieldMeta = { origin: "observed", state: "cached", provider: "samsara", observedAt: "2026-08-05T11:30:00.000Z" };
+    assert.equal(fieldStatusPhrase("HOS", cached, NOW, "ru"), "Часы работы (HOS): кэш (Samsara, 30 мин назад).");
+
+    const unavailable: FieldMeta = { origin: null, state: "unavailable", provider: null, observedAt: null };
+    assert.equal(fieldStatusPhrase("Speed", unavailable, NOW, "ru"), "Скорость: недоступно.");
+  });
+
+  test("buildPartialLiveDisclosure: 'ru' end-to-end, default (no language arg) still produces the original English disclosure", () => {
+    const NEUTRAL_META: FieldMeta = { origin: null, state: "unavailable", provider: null, observedAt: null };
+    const sources = {
+      safetyEvents: cachedSafetyEventsMeta("2026-08-04T12:00:00.000Z"),
+      hos: { origin: "observed", state: "cached", provider: "samsara", observedAt: "2026-08-05T11:30:00.000Z" } as FieldMeta,
+      speed: NEUTRAL_META,
+      weather: NEUTRAL_META,
+      zoneRisk: NEUTRAL_META,
+      location: NEUTRAL_META,
+    };
+    const unavailableZone = {
+      zoneRisk: null, zoneName: null, zoneType: null, zoneExplanation: null,
+      availability: "location_unavailable" as const, explanation: "Location unavailable",
+      status: "unavailable" as const, origin: null, provider: null, observedAt: null,
+      fetchedAt: NOW.toISOString(), latitude: null, longitude: null,
+      locationState: "unavailable" as const, locationObservedAt: null,
+      matchedZoneId: null, distanceMiles: null,
+    };
+    const liveData: SafetyEventsSyncInfo = { lastSyncTime: "2026-08-05T11:59:00.000Z" };
+
+    const englishDefault = buildPartialLiveDisclosure(sources, unavailableZone, liveData, NOW);
+    assert.match(englishDefault, /^Safety events: Synced 1 min ago \(Samsara\)\./);
+
+    const russian = buildPartialLiveDisclosure(sources, unavailableZone, liveData, NOW, "ru");
+    assert.match(russian, /^События безопасности: синхронизировано 1 мин назад \(Samsara\)\./);
+    assert.match(russian, /Часы работы \(HOS\): кэш \(Samsara, 30 мин назад\)\./);
   });
 });

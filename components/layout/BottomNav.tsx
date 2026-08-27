@@ -1,5 +1,7 @@
 "use client";
 
+import { useLanguage } from "@/lib/i18n/LanguageContext";
+
 type Tab = "dash" | "inspect" | "audit" | "settings";
 
 interface BottomNavProps {
@@ -48,14 +50,15 @@ function SettingsIcon() {
   );
 }
 
-const TABS: { id: Tab; label: string; Icon: () => JSX.Element }[] = [
-  { id: "dash",     label: "Heads-Up", Icon: HeadsUpIcon  },
-  { id: "inspect",  label: "Inspect",  Icon: InspectIcon  },
-  { id: "audit",    label: "Audit",    Icon: AuditIcon    },
-  { id: "settings", label: "Settings", Icon: SettingsIcon },
+const TAB_KEYS: { id: Tab; key: "navHeadsUp" | "navInspect" | "navAudit" | "navSettings"; Icon: () => JSX.Element }[] = [
+  { id: "dash",     key: "navHeadsUp",  Icon: HeadsUpIcon  },
+  { id: "inspect",  key: "navInspect",  Icon: InspectIcon  },
+  { id: "audit",    key: "navAudit",    Icon: AuditIcon    },
+  { id: "settings", key: "navSettings", Icon: SettingsIcon },
 ];
 
 export function BottomNav({ activeTab, onTabChange }: BottomNavProps) {
+  const { t } = useLanguage();
   return (
     <nav
       className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-[420px] flex justify-around z-[200]"
@@ -68,7 +71,7 @@ export function BottomNav({ activeTab, onTabChange }: BottomNavProps) {
         paddingBottom: "calc(10px + env(safe-area-inset-bottom, 0px))",
       }}
     >
-      {TABS.map(({ id, label, Icon }) => {
+      {TAB_KEYS.map(({ id, key, Icon }) => {
         const active = activeTab === id;
         return (
           <button
@@ -87,9 +90,10 @@ export function BottomNav({ activeTab, onTabChange }: BottomNavProps) {
                 fontSize: 10,
                 fontWeight: active ? 600 : 400,
                 letterSpacing: "0.1px",
+                whiteSpace: "nowrap",
               }}
             >
-              {label}
+              {t(key)}
             </span>
           </button>
         );

@@ -12,10 +12,12 @@ import { SettingsScreen } from "@/components/screens/SettingsScreen";
 import { LegalGateScreen } from "@/components/screens/LegalGateScreen";
 import { useTelegram } from "@/lib/useTelegram";
 import type { LegalDocumentSummary } from "@/lib/legal";
+import { useLanguage } from "@/lib/i18n/LanguageContext";
 
 type Tab = "dash" | "inspect" | "audit" | "settings";
 
 export default function Home() {
+  const { t } = useLanguage();
   const [activeTab, setActiveTab]   = useState<Tab>("dash");
   const [isDriving, setIsDriving]   = useState(false);
   const [toast, setToast]           = useState({ msg: "", visible: false });
@@ -84,7 +86,7 @@ export default function Home() {
   const handleToggleDriving = () => {
     const next = !isDriving;
     setIsDriving(next);
-    showToast(next ? "Driving mode activated" : "Driving mode off");
+    showToast(next ? t("toastDrivingOn") : t("toastDrivingOff"));
   };
 
   // ── Legal gate takes over the whole screen until accepted ────────────────
@@ -116,8 +118,8 @@ export default function Home() {
 
       <DrivingOverlay
         isVisible={isDriving}
-        onVoiceActivate={() => showToast("Listening...")}
-        onCopyPhrase={(p) => { navigator.clipboard?.writeText(p); showToast("Phrase copied"); }}
+        onVoiceActivate={() => showToast(t("toastListening"))}
+        onCopyPhrase={(p) => { navigator.clipboard?.writeText(p); showToast(t("toastPhraseCopied")); }}
       />
 
       {!isDriving && (
@@ -127,19 +129,19 @@ export default function Home() {
         >
           {activeTab === "dash"     && (
             <DashboardScreen
-              onIncident={() => showToast("Incident report submitted")}
+              onIncident={() => showToast(t("toastIncidentSubmitted"))}
             />
           )}
           {activeTab === "inspect"  && <InspectScreen />}
           {activeTab === "audit"    && (
             <AuditScreen
-              onGenerateReport={() => showToast("Generating report...")}
-              onExpandCard={() => showToast("Loading event details...")}
+              onGenerateReport={() => showToast(t("toastGeneratingReport"))}
+              onExpandCard={() => showToast(t("toastLoadingEventDetails"))}
             />
           )}
           {activeTab === "settings" && (
             <SettingsScreen
-              onLogout={() => showToast("Logged out")}
+              onLogout={() => showToast(t("toastLoggedOut"))}
             />
           )}
         </main>

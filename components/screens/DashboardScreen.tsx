@@ -14,6 +14,12 @@ import {
   classifyRecommendation,
   type RecommendationCategory,
 } from "@/lib/recommendationDisplay";
+import { useLanguage } from "@/lib/i18n/LanguageContext";
+import { translateRiskLevel, translateContextStatus, translateMissingContextItem, translateContextualSpeedComponent } from "@/lib/i18n/enumLabels";
+import { translateFactorName } from "@/lib/i18n/factorLabels";
+import { translateRecommendation } from "@/lib/i18n/recommendationLabels";
+import { translateEventType } from "@/lib/i18n/eventTypeLabels";
+import type { Language } from "@/lib/i18n/translations";
 import {
   Cloud, Moon, Gauge, MapPin, Smartphone, AlertTriangle,
   Wrench, Info, ChevronRight, TriangleAlert,
@@ -30,13 +36,17 @@ import {
 
 // ── Design helpers ─────────────────────────────────────────────────────────────
 
+// Localization (2026-08-27): the risk-level/context-status display label
+// (`translateRiskLevel`/`translateContextStatus`, lib/i18n/enumLabels.ts)
+// is now looked up separately by language — LEVEL_CONFIG/
+// CONTEXT_STATUS_CONFIG below only carry color tokens.
 const LEVEL_CONFIG: Record<string, {
-  color: string; label: string; bg: string; border: string;
+  color: string; bg: string; border: string;
 }> = {
-  LOW:      { color: "var(--green)",   label: "Low Risk",      bg: "var(--green-dim)",   border: "var(--green-border)"   },
-  MEDIUM:   { color: "var(--warning)", label: "Medium Risk",   bg: "var(--warning-dim)", border: "var(--warning-border)" },
-  HIGH:     { color: "var(--warning)", label: "High Risk",     bg: "var(--warning-dim)", border: "var(--warning-border)" },
-  CRITICAL: { color: "var(--red)",     label: "Critical Risk", bg: "var(--red-dim)",     border: "var(--red-border)"     },
+  LOW:      { color: "var(--green)",   bg: "var(--green-dim)",   border: "var(--green-border)"   },
+  MEDIUM:   { color: "var(--warning)", bg: "var(--warning-dim)", border: "var(--warning-border)" },
+  HIGH:     { color: "var(--warning)", bg: "var(--warning-dim)", border: "var(--warning-border)" },
+  CRITICAL: { color: "var(--red)",     bg: "var(--red-dim)",     border: "var(--red-border)"     },
 };
 
 // PROVIDER_LABELS, classifySpecial, fieldStatusPhrase, zoneStatusPhrase,
@@ -46,17 +56,17 @@ const LEVEL_CONFIG: Record<string, {
 // convention, which .tsx component files have no harness for. See that
 // module for the up-to-date doc comments.
 
-const CONTEXT_STATUS_CONFIG: Record<ContextStatus, { color: string; statusLabel: string }> = {
-  full_live:    { color: "var(--green)",         statusLabel: "Fully live"     },
-  partial_live: { color: "var(--warning)",       statusLabel: "Partially live" },
-  demo:         { color: "var(--text-tertiary)", statusLabel: "Public Demo"    },
+const CONTEXT_STATUS_CONFIG: Record<ContextStatus, { color: string }> = {
+  full_live:    { color: "var(--green)"         },
+  partial_live: { color: "var(--warning)"       },
+  demo:         { color: "var(--text-tertiary)" },
 };
 
-/** "A, B and C" — small local join, same shape as the joinWithAnd() helper Phase 5 removed elsewhere, kept minimal since missingContext never exceeds 3 items (weather/zone/HOS). */
-function joinList(items: string[]): string {
+/** "A, B and C" / "A, B и C" — small local join, same shape as the joinWithAnd() helper Phase 5 removed elsewhere, kept minimal since missingContext never exceeds 3 items (weather/zone/HOS). `and` is the already-translated conjunction word (see translations.ts's `andJoiner`). */
+function joinList(items: string[], and: string): string {
   if (items.length <= 1) return items.join("");
-  if (items.length === 2) return `${items[0]} and ${items[1]}`;
-  return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+  if (items.length === 2) return `${items[0]} ${and} ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")} ${and} ${items[items.length - 1]}`;
 }
 
 /** +40% / -10% / +0% — signed whole-percent display for a contextual speed modifier. */
@@ -65,22 +75,22 @@ function formatModifierPercent(modifier: number): string {
   return `${pct >= 0 ? "+" : ""}${pct}%`;
 }
 
-function formatEventType(type: string): string {
-  return type.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
-}
-
-function formatTs(iso: string): string {
-  return new Date(iso).toLocaleString("en-US", {
+// formatTs's locale switches with the display language (en-US/ru-RU); the
+// underlying instant/shape is unchanged — this is a frontend formatting
+// choice only, no backend timestamp semantics change (see
+// lib/auditFormatting.ts's equivalent, language-only, doc comment).
+function formatTs(iso: string, language: Language): string {
+  return new Date(iso).toLocaleString(language === "ru" ? "ru-RU" : "en-US", {
     month: "short", day: "numeric",
     hour: "2-digit", minute: "2-digit",
   });
 }
 
-function getGreeting(): string {
+function getGreetingKey(): "greetingMorning" | "greetingAfternoon" | "greetingEvening" {
   const h = new Date().getHours();
-  if (h < 12) return "Good morning";
-  if (h < 18) return "Good afternoon";
-  return "Good evening";
+  if (h < 12) return "greetingMorning";
+  if (h < 18) return "greetingAfternoon";
+  return "greetingEvening";
 }
 
 // Map a recommendation string → icon + title
@@ -103,13 +113,16 @@ const RECOMMENDATION_ICONS: Record<RecommendationCategory, React.ReactNode> = {
   advisory:       <Info {...ICON_PROPS} />,
 };
 
-function parseRecommendation(rec: string): {
+function parseRecommendation(rec: string, language: Language): {
   icon: React.ReactNode;
   title: string;
   description: string;
 } {
-  const { category, title } = classifyRecommendation(rec);
-  return { icon: RECOMMENDATION_ICONS[category], title, description: rec };
+  // Classification always runs on the original English `rec` text (see
+  // lib/recommendationDisplay.ts's file header); only the category title
+  // and the displayed sentence are translated for `language`.
+  const { category, title } = classifyRecommendation(rec, language);
+  return { icon: RECOMMENDATION_ICONS[category], title, description: translateRecommendation(rec, language) };
 }
 
 // ── Skeleton loading block ─────────────────────────────────────────────────────
@@ -123,6 +136,7 @@ function SkeletonBlock({ height, radius = 12 }: { height: number; radius?: numbe
 
 export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
   const telegramUser = useTelegram();
+  const { language, t } = useLanguage();
 
   const [riskData,         setRiskData]         = useState<RiskApiResponse | null>(null);
   const [location,         setLocation]         = useState<LocationApiResponse | null>(null);
@@ -206,7 +220,8 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
 
   const result      = riskData?.result;
   const levelConfig = result ? (LEVEL_CONFIG[result.level] ?? LEVEL_CONFIG.HIGH) : null;
-  const parsedRecs  = result?.recommendations.map(parseRecommendation) ?? [];
+  const levelLabel  = result ? translateRiskLevel(result.level, language) : "";
+  const parsedRecs  = result?.recommendations.map((rec) => parseRecommendation(rec, language)) ?? [];
 
   // Preferred order: canonicalName (real operational identity) > Telegram
   // first+last > Telegram username > generic fallback. See lib/driverIdentity.ts.
@@ -226,10 +241,10 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
       {/* ── 1. Greeting ─────────────────────────────────────────────────────── */}
       <div>
         <div style={{ fontSize: 24, fontWeight: 600, color: "var(--text-primary)", letterSpacing: "-0.5px", lineHeight: 1.2 }}>
-          {getGreeting()}{displayName ? `, ${displayName}` : ""}.
+          {t(getGreetingKey())}{displayName ? `, ${displayName}` : ""}.
         </div>
         <div style={{ fontSize: 14, color: "var(--text-secondary)", marginTop: 4 }}>
-          Drive safely today.
+          {t("driveSafelyToday")}
         </div>
       </div>
 
@@ -244,7 +259,7 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
       >
         {/* Header label */}
         <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-tertiary)", letterSpacing: "0.6px", textTransform: "uppercase", marginBottom: 16 }}>
-          Real-time predictive risk
+          {t("realtimePredictiveRisk")}
         </div>
 
         {loading && (
@@ -257,7 +272,7 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
 
         {error && (
           <div style={{ fontSize: 13, color: "var(--red)", textAlign: "center", padding: "12px 0" }}>
-            Failed to load risk data. Please try again.
+            {t("failedLoadRisk")}
           </div>
         )}
 
@@ -300,7 +315,7 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
                   }}
                 />
                 <span style={{ fontSize: 11, fontWeight: 600, color: levelConfig.color, letterSpacing: "0.4px", textTransform: "uppercase" }}>
-                  {levelConfig.label}
+                  {levelLabel}
                 </span>
               </div>
             </div>
@@ -310,13 +325,13 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
               <>
                 <div style={{ height: 1, background: "var(--border)", margin: "20px 0 16px" }} />
                 <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-tertiary)", letterSpacing: "0.6px", textTransform: "uppercase", marginBottom: 14 }}>
-                  Primary risk factors
+                  {t("primaryRiskFactors")}
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                   {result.factors.slice(0, 3).map((f) => (
                     <div key={f.name}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
-                        <span style={{ fontSize: 13, fontWeight: 500, color: "var(--text-primary)" }}>{f.name}</span>
+                        <span style={{ fontSize: 13, fontWeight: 500, color: "var(--text-primary)" }}>{translateFactorName(f.name, language)}</span>
                         <span style={{ fontSize: 12, color: "var(--text-secondary)", fontFamily: "JetBrains Mono, monospace" }}>{f.impact}%</span>
                       </div>
                       <div style={{ height: 3, borderRadius: 99, background: "var(--border)", overflow: "hidden" }}>
@@ -348,16 +363,16 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
                       />
                       <span style={{ fontSize: 12, fontWeight: 500, color: CONTEXT_STATUS_CONFIG[riskData.contextStatus].color }}>
                         {riskData.contextStatus === "full_live"
-                          ? `${CONTEXT_STATUS_CONFIG.full_live.statusLabel} (${PROVIDER_LABELS[riskData.liveData.provider] ?? riskData.liveData.provider})`
-                          : CONTEXT_STATUS_CONFIG.partial_live.statusLabel}
+                          ? `${translateContextStatus("full_live", language)} (${PROVIDER_LABELS[riskData.liveData.provider] ?? riskData.liveData.provider})`
+                          : translateContextStatus("partial_live", language)}
                       </span>
                     </div>
                   ) : (
-                    <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>{CONTEXT_STATUS_CONFIG.demo.statusLabel}</span>
+                    <span style={{ fontSize: 12, color: "var(--text-tertiary)" }}>{translateContextStatus("demo", language)}</span>
                   )}
                   {riskData.contextStatus !== "demo" && riskData.liveData && riskData.liveData.driverEventCount24h > 0 && (
                     <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>
-                      {riskData.liveData.driverEventCount24h} event{riskData.liveData.driverEventCount24h !== 1 ? "s" : ""} · 24h
+                      {t("eventsSuffix24h", { n: riskData.liveData.driverEventCount24h })}
                     </span>
                   )}
                 </div>
@@ -372,15 +387,15 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
                     low), separate from and in addition to the existing
                     per-field disclosure below, which it does not replace. */}
                 <div style={{ fontSize: 11.5, color: "var(--text-tertiary)", marginTop: 6 }}>
-                  Live inputs: {riskData.dataCompleteness.count} of {riskData.dataCompleteness.total}
+                  {t("liveInputsOf", { count: riskData.dataCompleteness.count, total: riskData.dataCompleteness.total })}
                 </div>
                 {riskData.contextStatus === "partial_live" && (
                   <div style={{ fontSize: 11.5, color: "var(--text-tertiary)", marginTop: 8, lineHeight: 1.4 }}>
-                    {buildPartialLiveDisclosure(riskData.contextSources, riskData.zone, riskData.liveData)}
+                    {buildPartialLiveDisclosure(riskData.contextSources, riskData.zone, riskData.liveData, new Date(), language)}
                     {/* Demo accounts only (dataSource "mock") — appended, never replacing the
                         per-field technical breakdown above. Real pilot drivers on a partial_live
                         connection (dataSource "real") see the breakdown exactly as before. */}
-                    {riskData.dataSource === "mock" && " This account uses simulated driving data for demonstration. Connected fleet drivers receive real telematics data."}
+                    {riskData.dataSource === "mock" && ` ${t("demoDisclosure")}`}
                   </div>
                 )}
               </div>
@@ -403,12 +418,12 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
           }}
         >
           {[
-            ["Provider",     PROVIDER_LABELS[riskData.liveData.provider] ?? riskData.liveData.provider],
-            ["Data status",  CONTEXT_STATUS_CONFIG[riskData.contextStatus].statusLabel],
-            ["Last event",   formatEventType(riskData.liveData.lastEventType)],
-            ["Event time",   riskData.liveData.lastEventTimestamp ? formatTs(riskData.liveData.lastEventTimestamp) : "—"],
-            ["Last sync",    riskData.liveData.lastSyncTime ? formatTs(riskData.liveData.lastSyncTime) : "—"],
-            ["Events (24h)", String(riskData.liveData.driverEventCount24h)],
+            [t("fieldProvider"),    PROVIDER_LABELS[riskData.liveData.provider] ?? riskData.liveData.provider],
+            [t("fieldDataStatus"),  translateContextStatus(riskData.contextStatus, language)],
+            [t("fieldLastEvent"),   translateEventType(riskData.liveData.lastEventType, language)],
+            [t("fieldEventTime"),   riskData.liveData.lastEventTimestamp ? formatTs(riskData.liveData.lastEventTimestamp, language) : "—"],
+            [t("fieldLastSync"),    riskData.liveData.lastSyncTime ? formatTs(riskData.liveData.lastSyncTime, language) : "—"],
+            [t("fieldEvents24h"),   String(riskData.liveData.driverEventCount24h)],
           ].map(([label, value]) => (
             <div key={label}>
               <div style={{ fontSize: 10, fontWeight: 500, color: "var(--text-tertiary)", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 3 }}>
@@ -439,29 +454,31 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
         >
           <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 12 }}>
             <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", letterSpacing: "0.2px" }}>
-              Contextual Speed
+              {t("contextualSpeed")}
             </span>
             <span style={{ fontSize: 15, fontWeight: 700, color: "var(--text-primary)", fontVariantNumeric: "tabular-nums" }}>
-              {result.contextualSpeed.finalPenalty.toFixed(1)} pts
+              {t("ptsSuffix", { value: result.contextualSpeed.finalPenalty.toFixed(1) })}
             </span>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5 }}>
-              <span style={{ color: "var(--text-secondary)" }}>Speed exposure</span>
+              <span style={{ color: "var(--text-secondary)" }}>{t("speedExposure")}</span>
               <span style={{ color: "var(--text-primary)", fontVariantNumeric: "tabular-nums" }}>{result.contextualSpeed.speedExposure.toFixed(1)}</span>
             </div>
             {result.contextualSpeed.components
               .filter((c) => c.included && c.modifier > 0)
               .map((c) => (
                 <div key={c.key} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5 }}>
-                  <span style={{ color: "var(--text-secondary)" }}>{c.label} amplification</span>
+                  <span style={{ color: "var(--text-secondary)" }}>{t("amplificationSuffix", { label: translateContextualSpeedComponent(c.key, language) })}</span>
                   <span style={{ color: "var(--text-primary)", fontVariantNumeric: "tabular-nums" }}>{formatModifierPercent(c.modifier)}</span>
                 </div>
               ))}
           </div>
           {!result.contextualSpeed.contextComplete && (
             <div style={{ fontSize: 11.5, color: "var(--text-tertiary)", marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
-              Context incomplete: {joinList(result.contextualSpeed.missingContext)} data unavailable.
+              {t("contextIncomplete", {
+                list: joinList(result.contextualSpeed.missingContext.map((m) => translateMissingContextItem(m, language)), t("andJoiner")),
+              })}
             </div>
           )}
         </div>
@@ -490,7 +507,7 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
           }}
         >
           <TriangleAlert size={18} strokeWidth={1.75} />
-          Initiate Incident Protocol
+          {t("initiateIncidentProtocol")}
         </button>
 
         {showIncidentForm && (
@@ -504,12 +521,12 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
             }}
           >
             <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 10 }}>
-              Incident description
+              {t("incidentDescription")}
             </div>
             <textarea
               value={incidentText}
               onChange={(e) => setIncidentText(e.target.value)}
-              placeholder="Briefly describe what happened..."
+              placeholder={t("incidentPlaceholder")}
               rows={3}
               style={{
                 width: "100%",
@@ -542,7 +559,7 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
                   transition: "opacity 0.15s",
                 }}
               >
-                {submitting ? "Submitting..." : "Submit report"}
+                {submitting ? t("submitting") : t("submitReport")}
               </button>
               <button
                 onClick={() => { setShowIncidentForm(false); setIncidentText(""); }}
@@ -557,7 +574,7 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
                   cursor: "pointer",
                 }}
               >
-                Cancel
+                {t("cancel")}
               </button>
             </div>
           </div>
@@ -567,7 +584,7 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
       {/* ── 4. Today's Summary ───────────────────────────────────────────────── */}
       <div>
         <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 12, letterSpacing: "0.2px" }}>
-          Today&apos;s Summary
+          {t("todaysSummary")}
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
           {[
@@ -575,19 +592,19 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
               value: loading ? "—" : (riskData && riskData.todaySummary.dataStatus.checks === "available"
                 ? String(riskData.todaySummary.checksPassed) : "—"),
               color: "var(--green)",
-              label: "Checks\npassed",
+              label: t("checksPassed"),
             },
             {
               value: loading ? "—" : (riskData && riskData.todaySummary.dataStatus.mileage === "available" && riskData.todaySummary.milesDriven !== null
                 ? String(riskData.todaySummary.milesDriven) : "—"),
               color: "var(--blue)",
-              label: "Miles\ndriven",
+              label: t("milesDrivenLabel"),
             },
             {
               value: loading ? "—" : (riskData && riskData.todaySummary.dataStatus.alerts === "available"
                 ? String(riskData.todaySummary.alertsActive) : "—"),
               color: riskData && riskData.todaySummary.alertsActive > 0 ? "var(--warning)" : "var(--text-secondary)",
-              label: "Alerts\nactive",
+              label: t("alertsActive"),
             },
           ].map((s) => (
             <div
@@ -631,7 +648,7 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
       {parsedRecs.length > 0 && (
         <div>
           <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 12, letterSpacing: "0.2px" }}>
-            Recommendations
+            {t("recommendations")}
           </div>
           <div
             style={{

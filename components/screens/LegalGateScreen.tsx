@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { LegalDocumentSummary } from "@/lib/legal";
+import { useLanguage } from "@/lib/i18n/LanguageContext";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -24,6 +25,7 @@ interface LegalGateScreenProps {
 // intentionally not a new visual language.
 
 export function LegalGateScreen({ driverId, pending, onAccepted }: LegalGateScreenProps) {
+  const { t } = useLanguage();
   const [expandedType, setExpandedType] = useState<string | null>(null);
   const [documents, setDocuments]       = useState<Record<string, LegalDocumentFull>>({});
   const [docLoading, setDocLoading]     = useState<string | null>(null);
@@ -46,7 +48,7 @@ export function LegalGateScreen({ driverId, pending, onAccepted }: LegalGateScre
       const { document } = await res.json();
       setDocuments((prev) => ({ ...prev, [type]: document }));
     } catch {
-      setError("Couldn't load that document. Please try again.");
+      setError(t("couldntLoadDocument"));
     } finally {
       setDocLoading(null);
     }
@@ -67,11 +69,11 @@ export function LegalGateScreen({ driverId, pending, onAccepted }: LegalGateScre
         )
       );
       if (results.some((res) => !res.ok)) {
-        throw new Error("One or more documents failed to record acceptance");
+        throw new Error(t("acceptanceFailed"));
       }
       onAccepted();
     } catch {
-      setError("Something went wrong recording your acceptance. Please try again.");
+      setError(t("acceptanceError"));
       setSubmitting(false);
     }
   }
@@ -99,12 +101,10 @@ export function LegalGateScreen({ driverId, pending, onAccepted }: LegalGateScre
       {/* Explanation */}
       <div style={{ textAlign: "center" }}>
         <div style={{ fontSize: 18, fontWeight: 600, color: "var(--text-primary)", marginBottom: 8 }}>
-          Before you continue
+          {t("beforeYouContinue")}
         </div>
         <div style={{ fontSize: 14, color: "var(--text-secondary)", lineHeight: 1.5 }}>
-          SafeHaul uses your driving and vehicle data to provide safety recommendations,
-          risk scores, and inspection results. Please review and accept the documents
-          below to continue.
+          {t("legalExplanation")}
         </div>
       </div>
 
@@ -136,7 +136,7 @@ export function LegalGateScreen({ driverId, pending, onAccepted }: LegalGateScre
                 fontWeight: 600,
               }}
             >
-              View {doc.title}
+              {t("viewDocPrefix")} {doc.title}
               <span style={{ color: "var(--text-tertiary)" }}>
                 {expandedType === doc.type ? "−" : "›"}
               </span>
@@ -157,8 +157,8 @@ export function LegalGateScreen({ driverId, pending, onAccepted }: LegalGateScre
                 }}
               >
                 {docLoading === doc.type
-                  ? "Loading..."
-                  : documents[doc.type]?.content ?? "Unable to load document."}
+                  ? t("loadingDoc")
+                  : documents[doc.type]?.content ?? t("unableToLoadDoc")}
               </div>
             )}
           </div>
@@ -184,7 +184,7 @@ export function LegalGateScreen({ driverId, pending, onAccepted }: LegalGateScre
           style={{ marginTop: 2, width: 16, height: 16, flexShrink: 0 }}
         />
         <span>
-          I have read and agree to the Terms of Use and acknowledge the Privacy Notice.
+          {t("agreeCheckboxLabel")}
         </span>
       </label>
 
@@ -208,7 +208,7 @@ export function LegalGateScreen({ driverId, pending, onAccepted }: LegalGateScre
           cursor: !checked || submitting ? "not-allowed" : "pointer",
         }}
       >
-        {submitting ? "Submitting..." : "Agree & Continue"}
+        {submitting ? t("submitting") : t("agreeContinue")}
       </button>
     </div>
   );

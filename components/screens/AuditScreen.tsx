@@ -4,6 +4,14 @@ import { useEffect, useState } from "react";
 import { useTelegram } from "@/lib/useTelegram";
 import { AuditEvent } from "@/lib/audit";
 import type { LocationApiResponse } from "@/lib/api/location";
+import { useLanguage } from "@/lib/i18n/LanguageContext";
+import {
+  translateAuditBadge,
+  translateAuditTitle,
+  translateAuditDetail,
+  translateAuditMeta,
+} from "@/lib/i18n/auditLabels";
+import type { Language, TranslationKey } from "@/lib/i18n/translations";
 import {
   LogIn, CheckCircle2, Truck, ClipboardCheck, AlertTriangle,
   Zap, ChevronRight, BarChart2, TrendingUp, Calendar,
@@ -44,9 +52,19 @@ function getTimelineColors(badgeType: AuditEvent["badgeType"]): { dot: string; i
 
 // ── Sub-components ─────────────────────────────────────────────────────────────
 
-function TimelineItem({ evt, isLast }: { evt: AuditEvent; isLast: boolean; onClick: () => void }) {
+function TimelineItem({ evt, isLast, language }: { evt: AuditEvent; isLast: boolean; onClick: () => void; language: Language }) {
   const colors = getTimelineColors(evt.badgeType);
-  const icon   = getTimelineIcon(evt.badgeType, evt.title);
+  // Icon selection deliberately keys off the ORIGINAL English evt.title
+  // (not the translated display title below) — see
+  // lib/i18n/auditLabels.ts's file header: this keeps icon selection
+  // robust regardless of display language, matching the Plan Mode report's
+  // "Dynamic label strategy" section E.
+  const icon = getTimelineIcon(evt.badgeType, evt.title);
+
+  const title  = translateAuditTitle(evt.title, language);
+  const badge  = translateAuditBadge(evt.badge, language);
+  const detail = translateAuditDetail(evt.detail, language);
+  const meta   = translateAuditMeta(evt.meta, language);
 
   return (
     <div style={{ display: "flex", gap: 14 }}>
@@ -85,7 +103,7 @@ function TimelineItem({ evt, isLast }: { evt: AuditEvent; isLast: boolean; onCli
       <div style={{ flex: 1, paddingBottom: isLast ? 0 : 20, minWidth: 0 }}>
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8, marginBottom: 4 }}>
           <span style={{ fontSize: 14, fontWeight: 500, color: "var(--text-primary)", lineHeight: 1.3 }}>
-            {evt.title}
+            {title}
           </span>
           <span
             style={{
@@ -100,19 +118,19 @@ function TimelineItem({ evt, isLast }: { evt: AuditEvent; isLast: boolean; onCli
               letterSpacing: "0.3px",
             }}
           >
-            {evt.badge}
+            {badge}
           </span>
         </div>
         <div style={{ fontSize: 12, color: "var(--text-secondary)", lineHeight: 1.5, marginBottom: 4 }}>
-          {evt.detail}
+          {detail}
         </div>
         <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
           {evt.date.replace("📅 ", "")}
         </div>
-        {evt.meta.length > 0 && (
+        {meta.length > 0 && (
           <div style={{ display: "flex", gap: 10, marginTop: 6, flexWrap: "wrap" }}>
-            {evt.meta.map((m) => (
-              <span key={m} style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
+            {meta.map((m, i) => (
+              <span key={`${m}-${i}`} style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
                 {m}
               </span>
             ))}
@@ -123,14 +141,24 @@ function TimelineItem({ evt, isLast }: { evt: AuditEvent; isLast: boolean; onCli
   );
 }
 
-const REPORTS = [
-  { icon: <Calendar size={18} strokeWidth={1.75} />,    title: "Daily Report",   description: "Safety summary for today", color: "var(--blue)"    },
-  { icon: <BarChart2 size={18} strokeWidth={1.75} />,   title: "Weekly Summary", description: "7-day performance overview", color: "var(--green)"   },
-  { icon: <TrendingUp size={18} strokeWidth={1.75} />,  title: "Monthly Analysis",description: "30-day trends and insights", color: "var(--warning)" },
-  { icon: <FileSearch size={18} strokeWidth={1.75} />,  title: "Custom Report",  description: "Define your own date range", color: "var(--blue)"    },
-];
+interface ReportEntry {
+  icon: React.ReactNode;
+  title: string;
+  description: string;
+  color: string;
+}
 
-function ReportCard({ report, onClick }: { report: typeof REPORTS[0]; onClick: () => void }) {
+/** Builds the four report cards' text from the current language — a plain function (not a hook) since it does no state/effect work of its own, just a t()-driven mapping recomputed on each render. */
+function buildReports(t: (key: TranslationKey) => string): ReportEntry[] {
+  return [
+    { icon: <Calendar size={18} strokeWidth={1.75} />,   title: t("reportDailyTitle"),   description: t("reportDailyDesc"),   color: "var(--blue)"    },
+    { icon: <BarChart2 size={18} strokeWidth={1.75} />,  title: t("reportWeeklyTitle"),  description: t("reportWeeklyDesc"),  color: "var(--green)"   },
+    { icon: <TrendingUp size={18} strokeWidth={1.75} />, title: t("reportMonthlyTitle"), description: t("reportMonthlyDesc"), color: "var(--warning)" },
+    { icon: <FileSearch size={18} strokeWidth={1.75} />, title: t("reportCustomTitle"),  description: t("reportCustomDesc"),  color: "var(--blue)"    },
+  ];
+}
+
+function ReportCard({ report, onClick }: { report: ReportEntry; onClick: () => void }) {
   return (
     <div
       onClick={onClick}
@@ -183,6 +211,8 @@ export function AuditScreen({
   onExpandCard: () => void;
 }) {
   const telegramUser = useTelegram();
+  const { language, t } = useLanguage();
+  const reports = buildReports(t);
 
   const [events,   setEvents]   = useState<AuditEvent[]>([]);
   const [location, setLocation] = useState<LocationApiResponse | null>(null);
@@ -245,7 +275,7 @@ export function AuditScreen({
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
         <div>
           <div style={{ fontSize: 20, fontWeight: 600, color: "var(--text-primary)", letterSpacing: "-0.4px" }}>
-            Audit Trail
+            {t("auditTrail")}
           </div>
           {location && (
             <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 3 }}>
@@ -266,25 +296,25 @@ export function AuditScreen({
           marginBottom: 24,
         }}
       >
-        {(["log", "reports"] as AuditTab[]).map((t) => (
+        {(["log", "reports"] as AuditTab[]).map((tabId) => (
           <button
-            key={t}
-            onClick={() => setTab(t)}
+            key={tabId}
+            onClick={() => setTab(tabId)}
             style={{
               flex: 1,
               padding: "8px 0",
               borderRadius: 9,
               border: "none",
-              background: tab === t ? "var(--card)" : "transparent",
-              color: tab === t ? "var(--text-primary)" : "var(--text-tertiary)",
+              background: tab === tabId ? "var(--card)" : "transparent",
+              color: tab === tabId ? "var(--text-primary)" : "var(--text-tertiary)",
               fontSize: 13,
-              fontWeight: tab === t ? 600 : 400,
+              fontWeight: tab === tabId ? 600 : 400,
               cursor: "pointer",
               transition: "all 0.15s ease",
-              boxShadow: tab === t ? "0 1px 3px rgba(0,0,0,0.3)" : "none",
+              boxShadow: tab === tabId ? "0 1px 3px rgba(0,0,0,0.3)" : "none",
             }}
           >
-            {t === "log" ? "Log" : "Reports"}
+            {t(tabId === "log" ? "tabLog" : "tabReports")}
           </button>
         ))}
       </div>
@@ -308,14 +338,14 @@ export function AuditScreen({
 
           {error && (
             <div style={{ fontSize: 13, color: "var(--red)", textAlign: "center", padding: "24px 0" }}>
-              Failed to load audit events.
+              {t("failedLoadAudit")}
             </div>
           )}
 
           {!loading && !error && events.length === 0 && (
             <div style={{ textAlign: "center", padding: "48px 0" }}>
-              <div style={{ fontSize: 14, color: "var(--text-secondary)" }}>No activity recorded yet.</div>
-              <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginTop: 4 }}>Open the dashboard to begin tracking.</div>
+              <div style={{ fontSize: 14, color: "var(--text-secondary)" }}>{t("noActivity")}</div>
+              <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginTop: 4 }}>{t("openDashboardToTrack")}</div>
             </div>
           )}
 
@@ -327,6 +357,7 @@ export function AuditScreen({
                   evt={evt}
                   isLast={i === visibleEvents.length - 1 && !hasMore}
                   onClick={onExpandCard}
+                  language={language}
                 />
               ))}
 
@@ -347,8 +378,8 @@ export function AuditScreen({
                   }}
                 >
                   {showAll
-                    ? "Show fewer events"
-                    : `View ${events.length - PAGE} more events`}
+                    ? t("showFewerEvents")
+                    : t("viewMoreEvents", { n: events.length - PAGE })}
                 </button>
               )}
             </div>
@@ -367,11 +398,11 @@ export function AuditScreen({
               overflow: "hidden",
             }}
           >
-            {REPORTS.map((report, i) => (
+            {reports.map((report, i) => (
               <div
                 key={report.title}
                 style={{
-                  borderBottom: i < REPORTS.length - 1 ? "1px solid var(--border)" : "none",
+                  borderBottom: i < reports.length - 1 ? "1px solid var(--border)" : "none",
                 }}
               >
                 <ReportCard report={report} onClick={onGenerateReport} />
@@ -381,10 +412,10 @@ export function AuditScreen({
 
           <div style={{ marginTop: 16, padding: "14px 16px", background: "var(--card)", border: "1px solid var(--border)", borderRadius: 16 }}>
             <div style={{ fontSize: 12, fontWeight: 500, color: "var(--text-secondary)", marginBottom: 4 }}>
-              FMCSA Compliance Export
+              {t("fmcsaExportTitle")}
             </div>
             <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginBottom: 14 }}>
-              Generate a regulatory-ready report for FMCSA submission or carrier review.
+              {t("fmcsaExportDesc")}
             </div>
             <button
               onClick={onGenerateReport}
@@ -403,7 +434,7 @@ export function AuditScreen({
               }}
             >
               <Download size={15} strokeWidth={1.75} />
-              Export FMCSA Report
+              {t("exportFmcsaReport")}
             </button>
           </div>
         </div>

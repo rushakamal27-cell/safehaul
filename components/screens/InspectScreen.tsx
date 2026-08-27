@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import { useTelegram } from "@/lib/useTelegram";
 import type { CheckItem, InspectionResult } from "@/lib/inspection";
+import { useLanguage } from "@/lib/i18n/LanguageContext";
 import { Camera, CheckCircle2, AlertTriangle, XCircle, ChevronRight } from "lucide-react";
 
 // ── Image compression (unchanged) ─────────────────────────────────────────────
@@ -53,11 +54,28 @@ const ITEM_ICONS: Record<string, string> = {
   "Engine Bay":"⚙️",
 };
 
-const OVERALL_LABEL: Record<string, string> = {
-  PASS: "Passed",
-  WARN: "Warning",
-  FAIL: "Failed",
+// item.name comes verbatim from the backend's vision-model result
+// (lib/inspection.ts's EXPECTED_NAMES) — a small fixed, known set. Display
+// name translated exactly like ITEM_ICONS is keyed, with a safe fallback
+// to the original English name for anything unrecognized.
+const ITEM_NAME_LABELS: Record<string, string> = {
+  Tires:        "Шины",
+  Brakes:       "Тормоза",
+  Lights:       "Фары",
+  Windshield:   "Лобовое стекло",
+  "Engine Bay": "Моторный отсек",
 };
+
+function translateItemName(name: string, language: "en" | "ru"): string {
+  if (language === "en") return name;
+  return ITEM_NAME_LABELS[name] ?? name;
+}
+
+const OVERALL_LABEL_KEYS = {
+  PASS: "overallPassed",
+  WARN: "overallWarning",
+  FAIL: "overallFailed",
+} as const;
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 type ScreenState = "idle" | "uploading" | "results";
@@ -68,14 +86,14 @@ interface InspectionResponse extends InspectionResult {
 }
 
 // ── Check item — iOS Settings row style ────────────────────────────────────────
-function CheckItemRow({ item, showDivider, animate }: { item: CheckItem; showDivider: boolean; animate?: boolean }) {
+function CheckItemRow({ item, showDivider, animate, language }: { item: CheckItem; showDivider: boolean; animate?: boolean; language: "en" | "ru" }) {
   const cfg = STATUS_CONFIG[item.status] ?? STATUS_CONFIG.WARN;
   return (
     <>
       <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "13px 16px" }}>
         <span style={{ fontSize: 20, flexShrink: 0 }}>{ITEM_ICONS[item.name] ?? "🔍"}</span>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 14, fontWeight: 500, color: "var(--text-primary)" }}>{item.name}</div>
+          <div style={{ fontSize: 14, fontWeight: 500, color: "var(--text-primary)" }}>{translateItemName(item.name, language)}</div>
           <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 2, lineHeight: 1.4 }}>{item.detail}</div>
         </div>
         <div
@@ -108,6 +126,7 @@ function CheckItemRow({ item, showDivider, animate }: { item: CheckItem; showDiv
 // ── Main component ─────────────────────────────────────────────────────────────
 export function InspectScreen() {
   const telegramUser = useTelegram();
+  const { language, t } = useLanguage();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [state,  setState]  = useState<ScreenState>("idle");
@@ -129,7 +148,7 @@ export function InspectScreen() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ telegramUserId: telegramUser.id, name: telegramUser.firstName }),
       });
-      if (!driverRes.ok) throw new Error("Could not resolve driver");
+      if (!driverRes.ok) throw new Error(t("couldNotResolveDriver"));
       const { driver } = await driverRes.json();
 
       const compressed = await compressImage(file);
@@ -147,7 +166,7 @@ export function InspectScreen() {
       setResult(data);
       setState("results");
     } catch (err: any) {
-      setError(err.message ?? "Inspection failed");
+      setError(err.message ?? t("inspectionFailed"));
       setState("idle");
     }
 
@@ -169,10 +188,10 @@ export function InspectScreen() {
       {/* Page header */}
       <div>
         <div style={{ fontSize: 20, fontWeight: 600, color: "var(--text-primary)", letterSpacing: "-0.4px" }}>
-          Vehicle Inspection
+          {t("vehicleInspection")}
         </div>
         <div style={{ fontSize: 13, color: "var(--text-secondary)", marginTop: 4 }}>
-          AI-powered pre-trip analysis
+          {t("aiPoweredPreTrip")}
         </div>
       </div>
 
@@ -230,9 +249,9 @@ export function InspectScreen() {
               }}
               className={state === "uploading" ? "dot-pulse" : ""}
             />
-            {state === "idle"      && "Ready to scan"}
-            {state === "uploading" && "Analyzing vehicle..."}
-            {state === "results"   && `${OVERALL_LABEL[result!.overallResult]} — ${Math.round(result!.confidence * 100)}% confidence`}
+            {state === "idle"      && t("readyToScan")}
+            {state === "uploading" && t("analyzingVehicle")}
+            {state === "results"   && `${t(OVERALL_LABEL_KEYS[result!.overallResult])} — ${t("confidenceSuffix", { pct: Math.round(result!.confidence * 100) })}`}
           </div>
 
           {/* Result bounding-box overlays */}
@@ -324,7 +343,7 @@ export function InspectScreen() {
             }}
           >
             <Camera size={18} strokeWidth={1.75} />
-            {state === "uploading" ? "Analyzing vehicle..." : "Start Inspection"}
+            {state === "uploading" ? t("analyzingVehicle") : t("startInspection")}
           </button>
         </>
       )}
@@ -341,11 +360,10 @@ export function InspectScreen() {
           }}
         >
           <div style={{ fontSize: 13, fontWeight: 500, color: "var(--text-secondary)", marginBottom: 4 }}>
-            No recent inspections
+            {t("noRecentInspections")}
           </div>
           <div style={{ fontSize: 12, color: "var(--text-tertiary)", lineHeight: 1.5 }}>
-            Tap Start Inspection to photograph your vehicle.
-            The AI will check tires, brakes, lights, windshield, and engine bay.
+            {t("inspectInstructions")}
           </div>
         </div>
       )}
@@ -375,7 +393,7 @@ export function InspectScreen() {
           {/* Check items list */}
           <div>
             <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text-secondary)", marginBottom: 12, letterSpacing: "0.2px" }}>
-              Inspection Checklist
+              {t("inspectionChecklist")}
             </div>
             <div style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 20, overflow: "hidden" }}>
               {result.checkItems.map((item, i) => (
@@ -384,15 +402,19 @@ export function InspectScreen() {
                   item={item}
                   showDivider={i < result.checkItems.length - 1}
                   animate
+                  language={language}
                 />
               ))}
             </div>
           </div>
 
-          {/* AI summary */}
+          {/* AI summary — result.summary is free-form, AI-generated English
+              text (see lib/inspection.ts); it cannot be safely translated
+              frontend-only, so it is deliberately left as-is (unavoidable
+              remnant — see the Plan Mode report's section B/H). */}
           <div style={{ background: "var(--card)", border: "1px solid var(--border)", borderRadius: 16, padding: "14px 16px" }}>
             <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-tertiary)", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 8 }}>
-              AI Summary
+              {t("aiSummary")}
             </div>
             <div style={{ fontSize: 14, color: "var(--text-primary)", lineHeight: 1.5 }}>
               {result.summary}
@@ -414,7 +436,7 @@ export function InspectScreen() {
               cursor: "pointer",
             }}
           >
-            New Inspection
+            {t("newInspection")}
           </button>
         </>
       )}

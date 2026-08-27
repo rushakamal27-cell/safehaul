@@ -3,9 +3,10 @@
 import { useEffect, useState } from "react";
 import { useTelegram } from "@/lib/useTelegram";
 import { resolveDisplayName } from "@/lib/driverIdentity";
+import { useLanguage } from "@/lib/i18n/LanguageContext";
 import {
   User, Bell, SlidersHorizontal, Bluetooth, Shield,
-  Info, ChevronRight, LogOut,
+  Info, ChevronRight, LogOut, Languages,
 } from "lucide-react";
 
 // ── Sub-components ─────────────────────────────────────────────────────────────
@@ -124,6 +125,7 @@ interface SettingsScreenProps {
 
 export function SettingsScreen({ onLogout }: SettingsScreenProps) {
   const telegramUser = useTelegram();
+  const { language, setLanguage, t } = useLanguage();
   const [canonicalName, setCanonicalName] = useState<string | null>(null);
 
   // Resolve the driver record once to pick up canonicalName (real operational
@@ -164,7 +166,7 @@ export function SettingsScreen({ onLogout }: SettingsScreenProps) {
       {/* Page header + profile card */}
       <div>
         <div style={{ fontSize: 20, fontWeight: 600, color: "var(--text-primary)", letterSpacing: "-0.4px", marginBottom: 20 }}>
-          Settings
+          {t("settingsTitle")}
         </div>
 
         {/* Profile card */}
@@ -204,7 +206,7 @@ export function SettingsScreen({ onLogout }: SettingsScreenProps) {
               {displayName}
             </div>
             <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 2 }}>
-              Professional Driver · SafeHaul
+              {t("professionalDriver")}
             </div>
           </div>
 
@@ -221,43 +223,51 @@ export function SettingsScreen({ onLogout }: SettingsScreenProps) {
             }}
           >
             <div className="dot-pulse" style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--green)" }} />
-            <span style={{ fontSize: 11, fontWeight: 600, color: "var(--green)" }}>Active</span>
+            <span style={{ fontSize: 11, fontWeight: 600, color: "var(--green)" }}>{t("active")}</span>
           </div>
         </div>
       </div>
 
       {/* ── Account section ────────────────────────────────────────────────────── */}
-      <Section title="Account">
+      <Section title={t("sectionAccount")}>
         <SettingsRow
           icon={<User {...iconSize} />}
           iconColor="var(--blue)"
-          label="Driver Profile"
-          value="View"
+          label={t("driverProfile")}
+          value={t("view")}
           onClick={() => {}}
         />
         <Divider />
         <SettingsRow
           icon={<Bell {...iconSize} />}
           iconColor="var(--warning)"
-          label="Notifications"
-          value="On"
+          label={t("notifications")}
+          value={t("on")}
           onClick={() => {}}
         />
         <Divider />
         <SettingsRow
           icon={<SlidersHorizontal {...iconSize} />}
           iconColor="var(--green)"
-          label="Preferences"
+          label={t("preferences")}
           onClick={() => {}}
+        />
+        <Divider />
+        <SettingsRow
+          icon={<Languages {...iconSize} />}
+          iconColor="var(--blue)"
+          label={t("language")}
+          value={language === "en" ? "English" : "Русский"}
+          onClick={() => setLanguage(language === "en" ? "ru" : "en")}
         />
       </Section>
 
       {/* ── System section ─────────────────────────────────────────────────────── */}
-      <Section title="System">
+      <Section title={t("sectionSystem")}>
         <SettingsRow
           icon={<Bluetooth {...iconSize} />}
           iconColor="var(--blue)"
-          label="Connected Devices"
+          label={t("connectedDevices")}
           value="Samsara"
           onClick={() => {}}
         />
@@ -265,7 +275,7 @@ export function SettingsScreen({ onLogout }: SettingsScreenProps) {
         <SettingsRow
           icon={<Shield {...iconSize} />}
           iconColor="var(--green)"
-          label="Privacy"
+          label={t("privacy")}
           onClick={() => {}}
         />
         <Divider />
@@ -273,7 +283,7 @@ export function SettingsScreen({ onLogout }: SettingsScreenProps) {
           icon={<Info {...iconSize} />}
           iconColor="var(--text-tertiary)"
           iconBg="rgba(77,100,120,0.12)"
-          label="About SafeHaul"
+          label={t("aboutSafeHaul")}
           value="v0.2"
           onClick={() => {}}
         />
@@ -284,7 +294,7 @@ export function SettingsScreen({ onLogout }: SettingsScreenProps) {
         <SettingsRow
           icon={<LogOut {...iconSize} />}
           iconColor="var(--red)"
-          label="Log Out"
+          label={t("logOut")}
           destructive
           onClick={onLogout}
         />
@@ -292,8 +302,8 @@ export function SettingsScreen({ onLogout }: SettingsScreenProps) {
 
       {/* Footer */}
       <div style={{ textAlign: "center", paddingTop: 4, paddingBottom: 8 }}>
-        <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>SafeHaul v0.2.0 · Operational Safety Platform</div>
-        <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 3 }}>Built for professional drivers</div>
+        <div style={{ fontSize: 11, color: "var(--text-tertiary)" }}>{t("footerVersion")}</div>
+        <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 3 }}>{t("footerBuiltFor")}</div>
       </div>
 
     </div>

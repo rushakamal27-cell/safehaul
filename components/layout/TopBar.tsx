@@ -1,11 +1,14 @@
 "use client";
 
+import { useLanguage } from "@/lib/i18n/LanguageContext";
+
 interface TopBarProps {
   isDriving: boolean;
   onToggleDriving: () => void;
 }
 
 export function TopBar({ isDriving, onToggleDriving }: TopBarProps) {
+  const { t } = useLanguage();
   return (
     <header
       className="flex items-center justify-between px-5 sticky top-0 z-[100]"
@@ -50,7 +53,7 @@ export function TopBar({ isDriving, onToggleDriving }: TopBarProps) {
             color: "var(--text-secondary)",
           }}
         >
-          GPS Active
+          {t("gpsActive")}
         </span>
       </div>
     </header>
