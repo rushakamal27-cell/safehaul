@@ -76,8 +76,16 @@ export async function resolveCurrentVehicleId(
     where: { driverId, isPilot: true, isActive: true },
     select: { externalVehicleId: true },
   });
-  if (mapping?.externalVehicleId && looksLikeSamsaraId(mapping.externalVehicleId)) {
-    return { vehicleId: mapping.externalVehicleId, source: "provider_mapping" };
+  // Trim before validating/returning — provider mappings are provisioned
+  // out-of-band (no code in this repo writes externalVehicleId), so a
+  // leading/trailing whitespace artifact (e.g. a stray \r\n from a CSV/
+  // spreadsheet import) can reach this column undetected. Trimming here,
+  // at the sole point this value is consumed, means such contamination
+  // resolves correctly instead of silently rejecting a valid ID and
+  // falling through to the (fragile) DriverEvent-sourced fallback below.
+  const trimmedVehicleId = mapping?.externalVehicleId?.trim();
+  if (trimmedVehicleId && looksLikeSamsaraId(trimmedVehicleId)) {
+    return { vehicleId: trimmedVehicleId, source: "provider_mapping" };
   }
 
   const latestEvent = await driverEventClient.findFirst({
