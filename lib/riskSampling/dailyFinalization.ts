@@ -32,6 +32,7 @@ import { utcPreviousDayBounds } from "./dayBounds";
 import { computeDailyAverage } from "./dailyAverage";
 import { deriveRouteSpan, type ObservationForRouteSpan } from "./routeSpan";
 import { resolveLevel } from "@/lib/riskEngine";
+import type { ContextStatus } from "@/lib/driverContext/types";
 
 const MILEAGE_FETCH_TIMEOUT_MS = 8_000;
 /** Nominal hourly slots per day — informational only (DailySafetyScore.expectedSampleCount), never used as an averaging denominator. See dailyAverage.ts. */
@@ -47,7 +48,12 @@ export interface PilotDriverIdClient {
 
 export interface SafetyScoreSampleAggClient {
   findMany(args: {
-    where: { driverId: string; hourBucket: { gte: Date; lt: Date } };
+    where: {
+      driverId: string;
+      hourBucket: { gte: Date; lt: Date };
+      /** Excludes hours with no live positional evidence — see finalizeDailySafetyScore. */
+      contextStatus: { not: ContextStatus };
+    };
     select: { score: true };
   }): Promise<Array<{ score: number }>>;
 }
@@ -138,8 +144,22 @@ async function finalizeDailySafetyScore(
   });
   if (existing) return { status: "skipped", reason: "already_finalized" };
 
+  // Phase 6D closure (2026-10-07): exclude hours whose context carried no
+  // live positional evidence. Those samples hold a neutral-default score
+  // (see toRiskInput's `?? 0`) that was never a measurement of conditions —
+  // averaging them in produced normal-looking daily scores for a driver with
+  // no usable telemetry at all (1,005 samples / 42 daily rows, every one
+  // exactly 100). The denominator was already the count of samples actually
+  // included, never a fixed 24, so dropping them needs no other change; when
+  // a day has nothing valid left, the existing "no_samples" skip means NO
+  // DailySafetyScore row is created — an honest gap instead of a fabricated
+  // perfect day.
   const samples = await scoreSampleClient.findMany({
-    where: { driverId, hourBucket: { gte: dayStart, lt: dayEnd } },
+    where: {
+      driverId,
+      hourBucket: { gte: dayStart, lt: dayEnd },
+      contextStatus: { not: "insufficient_context" },
+    },
     select: { score: true },
   });
   const daily = computeDailyAverage(samples.map((s) => s.score));

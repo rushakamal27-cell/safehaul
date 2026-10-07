@@ -23,10 +23,17 @@
  * itself never blocks scoring on incomplete context (see
  * lib/driverContext/toRiskInput.ts's neutral-default rules), so a hourly
  * sample mirrors that exactly. What's preserved instead is provenance —
- * `contextStatus` (full_live/partial_live/demo) and a compact
- * `breakdownJson` snapshot (factors + contextSources) — reusing
- * lib/driverContext/contextStatus.ts and toContextSources.ts verbatim
- * rather than inventing a new provenance vocabulary.
+ * `contextStatus` (full_live/partial_live/insufficient_context/demo), a
+ * compact `breakdownJson` snapshot (factors + contextSources +
+ * dataCompleteness) — reusing lib/driverContext/contextStatus.ts and
+ * toContextSources.ts verbatim rather than inventing a new provenance
+ * vocabulary.
+ *
+ * Phase 6D closure (2026-10-07): the row is still always written, but an
+ * hour with no live positional evidence is now stamped
+ * `insufficient_context` and excluded from daily finalization's average
+ * (see lib/riskSampling/dailyFinalization.ts) — the score stays on record
+ * for auditability, it just can no longer masquerade as a valid one.
  */
 
 import { prisma } from "@/lib/prisma";
@@ -34,7 +41,7 @@ import { Prisma } from "@/lib/generated/prisma";
 import { assembleDriverContext } from "@/lib/driverContext/assemble";
 import { toRiskInput } from "@/lib/driverContext/toRiskInput";
 import { toContextSources } from "@/lib/driverContext/toContextSources";
-import { deriveContextStatus } from "@/lib/driverContext/contextStatus";
+import { deriveContextStatus, deriveDataCompleteness } from "@/lib/driverContext/contextStatus";
 import { calculateRisk } from "@/lib/riskEngine";
 import { utcHourBucket } from "./dayBounds";
 
@@ -108,6 +115,15 @@ async function processDriver(
   const input = toRiskInput(assembled.context);
   const contextSources = toContextSources(assembled.context);
   const contextStatus = deriveContextStatus(assembled.context);
+  // Phase 6D closure (2026-10-07): persist the live-field count alongside the
+  // existing per-field provenance so a future analytics/ML consumer can rank
+  // samples by how much real input backed them (rich vs. partial vs. nearly
+  // empty) without re-deriving it from contextSources. Goes into the existing
+  // breakdownJson Json column — no schema change. Note total is 6 and spans
+  // location too, which is a WIDER set than the 5 fields contextStatus uses;
+  // see deriveDataCompleteness's own comment. HOS is unavailable fleet-wide,
+  // so today's realistic ceiling is 5 of 6, not 6 of 6.
+  const dataCompleteness = deriveDataCompleteness(assembled.context);
   const result = calculateRisk(input);
 
   try {
@@ -118,7 +134,7 @@ async function processDriver(
         score: result.score,
         dangerLevel: result.level,
         contextStatus,
-        breakdownJson: { factors: result.factors, contextSources } as unknown as Prisma.InputJsonValue,
+        breakdownJson: { factors: result.factors, contextSources, dataCompleteness } as unknown as Prisma.InputJsonValue,
         sampledAt: new Date(assembled.calculatedAt),
       },
     });

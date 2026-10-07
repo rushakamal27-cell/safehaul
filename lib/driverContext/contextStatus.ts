@@ -19,32 +19,69 @@
  * below.
  */
 
-import type { ContextStatus, DriverContext, DriverContextField } from "./types";
+import type { ContextSourceMeta, ContextSources, ContextStatus, DriverContext } from "./types";
+import { toContextSources } from "./toContextSources";
 
-function isLive(field: DriverContextField<unknown>): boolean {
+/**
+ * Liveness is decided purely from provenance (origin + state) — never from
+ * the value — which is what lets the *-FromSources variants below classify a
+ * historical SafetyScoreSample from its persisted breakdownJson.contextSources
+ * using the exact same rule as a live context. Exported so
+ * lib/dataQuality/historicalSamples.ts cannot drift from this definition.
+ */
+export function isLiveProvenance(meta: ContextSourceMeta): boolean {
   return (
-    (field.origin === "observed" || field.origin === "estimated") &&
-    field.state !== "fallback" &&
-    field.state !== "unavailable"
+    (meta.origin === "observed" || meta.origin === "estimated") &&
+    meta.state !== "fallback" &&
+    meta.state !== "unavailable"
   );
 }
 
-function isDemo(field: DriverContextField<unknown>): boolean {
-  return field.origin === "simulated" && field.state === "fresh";
+export function isDemoProvenance(meta: ContextSourceMeta): boolean {
+  return meta.origin === "simulated" && meta.state === "fresh";
+}
+
+/**
+ * The three scoring inputs that only ever go live when the vehicle's own
+ * position did (see assemble.ts: weather/zoneRisk/speed are each gated on
+ * location.state === "fresh"). If none of them is live, the risk engine saw
+ * no situational evidence at all and `toRiskInput`'s neutral 0 defaults are
+ * the only thing standing in for conditions — which produces a benign,
+ * unearned score. Deliberately excludes `hos` (unavailable fleet-wide) and
+ * `safetyEvents` (an observed-but-empty list is a legitimate fact, but on its
+ * own it cannot justify a score).
+ */
+function hasNoLivePositionalInput(sources: ContextSources): boolean {
+  return [sources.speed, sources.weather, sources.zoneRisk].every((m) => !isLiveProvenance(m));
+}
+
+/**
+ * The single classification waterfall. Operates on provenance only, so it is
+ * identical for a live context and for a historical row's persisted
+ * contextSources — see lib/dataQuality/historicalSamples.ts.
+ */
+export function deriveContextStatusFromSources(sources: ContextSources): ContextStatus {
+  const scoringFields: ContextSourceMeta[] = [
+    sources.safetyEvents,
+    sources.hos,
+    sources.speed,
+    sources.weather,
+    sources.zoneRisk,
+  ];
+
+  // demo is checked first on purpose: a demo driver's fields are all
+  // origin "simulated", which isLiveProvenance() rejects, so they would
+  // otherwise be misreported as insufficient_context.
+  if (scoringFields.every(isDemoProvenance)) return "demo";
+  if (scoringFields.every(isLiveProvenance)) return "full_live";
+  // UNKNOWN ≠ SAFE (Phase 6D closure): mark the hour unusable rather than
+  // letting an empty context pass as an ordinary partial_live score.
+  if (hasNoLivePositionalInput(sources)) return "insufficient_context";
+  return "partial_live";
 }
 
 export function deriveContextStatus(context: DriverContext): ContextStatus {
-  const fields: DriverContextField<unknown>[] = [
-    context.safetyEvents,
-    context.hos,
-    context.speed,
-    context.weather,
-    context.zoneRisk,
-  ];
-
-  if (fields.every(isDemo)) return "demo";
-  if (fields.every(isLive)) return "full_live";
-  return "partial_live";
+  return deriveContextStatusFromSources(toContextSources(context));
 }
 
 /**
@@ -95,18 +132,24 @@ export function deriveContextStatus(context: DriverContext): ContextStatus {
  * Never weighted, never partial-credit: each of the six fields contributes
  * exactly 0 or 1 to `count`. `total` is always 6, not driver-dependent.
  */
-export function deriveDataCompleteness(context: DriverContext): { count: number; total: number } {
-  const fields: DriverContextField<unknown>[] = [
-    context.safetyEvents,
-    context.hos,
-    context.speed,
-    context.weather,
-    context.zoneRisk,
-    context.location,
+export function deriveDataCompletenessFromSources(
+  sources: ContextSources
+): { count: number; total: number } {
+  const fields: ContextSourceMeta[] = [
+    sources.safetyEvents,
+    sources.hos,
+    sources.speed,
+    sources.weather,
+    sources.zoneRisk,
+    sources.location,
   ];
 
   return {
-    count: fields.filter(isLive).length,
+    count: fields.filter(isLiveProvenance).length,
     total: fields.length,
   };
+}
+
+export function deriveDataCompleteness(context: DriverContext): { count: number; total: number } {
+  return deriveDataCompletenessFromSources(toContextSources(context));
 }
