@@ -59,6 +59,7 @@ const LEVEL_CONFIG: Record<string, {
 const CONTEXT_STATUS_CONFIG: Record<ContextStatus, { color: string }> = {
   full_live:    { color: "var(--green)"         },
   partial_live: { color: "var(--warning)"       },
+  insufficient_context: { color: "var(--red)" },
   demo:         { color: "var(--text-tertiary)" },
 };
 
@@ -364,7 +365,7 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
                       <span style={{ fontSize: 12, fontWeight: 500, color: CONTEXT_STATUS_CONFIG[riskData.contextStatus].color }}>
                         {riskData.contextStatus === "full_live"
                           ? `${translateContextStatus("full_live", language)} (${PROVIDER_LABELS[riskData.liveData.provider] ?? riskData.liveData.provider})`
-                          : translateContextStatus("partial_live", language)}
+                          : translateContextStatus(riskData.contextStatus, language)}
                       </span>
                     </div>
                   ) : (
@@ -389,7 +390,7 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
                 <div style={{ fontSize: 11.5, color: "var(--text-tertiary)", marginTop: 6 }}>
                   {t("liveInputsOf", { count: riskData.dataCompleteness.count, total: riskData.dataCompleteness.total })}
                 </div>
-                {riskData.contextStatus === "partial_live" && (
+                {(riskData.contextStatus === "partial_live" || riskData.contextStatus === "insufficient_context") && (
                   <div style={{ fontSize: 11.5, color: "var(--text-tertiary)", marginTop: 8, lineHeight: 1.4 }}>
                     {buildPartialLiveDisclosure(riskData.contextSources, riskData.zone, riskData.liveData, new Date(), language)}
                     {/* Demo accounts only (dataSource "mock") — appended, never replacing the

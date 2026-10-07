@@ -204,6 +204,30 @@ describe("syncProviderDriverName", () => {
     assert.equal(fakes.driverUpdateCalls.length, 0);
   });
 
+  // Real production case (Luka, DriverProviderMapping id="005"): a stored
+  // providerDriverName contaminated with a leading "\r\n". This proves the
+  // contamination could NOT have entered through this sync path — .trim()
+  // already strips CR/LF along with plain spaces — confirming (for the
+  // audit's root-cause report) that the row was written out-of-band.
+  test("CR/LF-contaminated incoming name is trimmed to exactly the clean value and persisted", async () => {
+    const fakes = makeFakes(
+      { id: "ext-1", driverId: "drv-1", providerDriverName: null },
+      { id: "drv-1", canonicalName: null }
+    );
+    await syncProviderDriverName("samsara", "ext-1", "\r\nNijaradze Luka", fakes);
+    assert.deepEqual(fakes.mappingUpdateCalls, [{ id: "ext-1", providerDriverName: "Nijaradze Luka" }]);
+    assert.deepEqual(fakes.driverUpdateCalls, [{ id: "drv-1", canonicalName: "Nijaradze Luka" }]);
+  });
+
+  test("a legitimate internal space in a name is never stripped, only leading/trailing whitespace", async () => {
+    const fakes = makeFakes(
+      { id: "ext-1", driverId: "drv-1", providerDriverName: null },
+      { id: "drv-1", canonicalName: null }
+    );
+    await syncProviderDriverName("samsara", "ext-1", "Nijaradze Luka", fakes);
+    assert.deepEqual(fakes.mappingUpdateCalls, [{ id: "ext-1", providerDriverName: "Nijaradze Luka" }]);
+  });
+
   test("mapping.providerDriverName matches but canonicalName has diverged → still resyncs canonicalName", async () => {
     const fakes = makeFakes(
       { id: "ext-1", driverId: "drv-1", providerDriverName: "Jane Doe" },

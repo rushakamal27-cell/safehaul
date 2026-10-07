@@ -31,11 +31,16 @@ export function translateRiskLevel(level: string, language: Language): string {
 const CONTEXT_STATUS_LABELS: Record<ContextStatus, Record<Language, string>> = {
   full_live:    { en: "Fully live",     ru: "Все данные в реальном времени" },
   partial_live: { en: "Partially live", ru: "Частично в реальном времени" },
+  // Phase 6D closure: no live positional data at all — say so plainly rather
+  // than implying a partially-live reading we don't have.
+  insufficient_context: { en: "Data unavailable", ru: "Данные недоступны" },
   demo:         { en: "Public Demo",    ru: "Публичная демо-версия" },
 };
 
 export function translateContextStatus(status: ContextStatus, language: Language): string {
-  return CONTEXT_STATUS_LABELS[status][language];
+  // Falls back rather than throwing if an unrecognized status ever reaches
+  // the UI (the column is a plain String in the DB, so it is not enum-safe).
+  return (CONTEXT_STATUS_LABELS[status] ?? CONTEXT_STATUS_LABELS.partial_live)[language];
 }
 
 const ZONE_AVAILABILITY_LABELS: Record<ZoneAvailability, Record<Language, string>> = {

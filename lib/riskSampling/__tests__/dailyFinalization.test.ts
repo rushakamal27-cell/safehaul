@@ -36,6 +36,13 @@ function makeScoreStore(driverId: string, scores: number[]) {
 interface HarnessOptions {
   pilotDriverIds: string[];
   scoresByDriver?: Record<string, number[]>;
+  /**
+   * Phase 6D closure: samples carrying their contextStatus, so a test can
+   * exercise finalizeDailySafetyScore's exclusion of hours that had no live
+   * positional evidence. When supplied, the fake honors the
+   * `contextStatus: { not: ... }` filter the real query applies.
+   */
+  taggedSamplesByDriver?: Record<string, Array<{ score: number; contextStatus: string }>>;
   observationsByDriver?: Record<string, Array<{
     observedAt: Date; latitude: number | null; longitude: number | null;
     speedMph: number | null; weatherRisk: number | null; zoneRisk: number | null;
@@ -56,6 +63,13 @@ function makeHarness(opts: HarnessOptions) {
 
   const scoreSampleClient: SafetyScoreSampleAggClient = {
     async findMany({ where }) {
+      const tagged = opts.taggedSamplesByDriver?.[where.driverId];
+      if (tagged) {
+        const excluded = where.contextStatus?.not;
+        return tagged
+          .filter((s) => s.contextStatus !== excluded)
+          .map((s) => ({ score: s.score }));
+      }
       const scores = opts.scoresByDriver?.[where.driverId] ?? [];
       return scores.map((score) => ({ score }));
     },
@@ -172,6 +186,59 @@ describe("runDailyFinalization — daily average denominator", () => {
     assert.equal(result.results[0].safetyScore.status, "skipped");
     assert.deepEqual(result.results[0].safetyScore, { status: "skipped", reason: "no_samples" });
     assert.equal(dailyScoreCreateCalls.length, 0);
+  });
+});
+
+// Phase 6D closure (2026-10-07): an hour with no live positional evidence
+// holds a neutral-default score that was never a measurement of conditions.
+// Averaging those in produced 42 consecutive DailySafetyScore rows of exactly
+// 100 for a driver with zero observations and no resolvable vehicle.
+describe("runDailyFinalization — insufficient_context exclusion (UNKNOWN != SAFE)", () => {
+  test("insufficient_context samples are excluded from the daily average and the denominator", async () => {
+    const { deps, dailyScoreCreateCalls } = makeHarness({
+      pilotDriverIds: ["driver-1"],
+      taggedSamplesByDriver: {
+        "driver-1": [
+          { score: 80, contextStatus: "partial_live" },
+          { score: 60, contextStatus: "partial_live" },
+          // these three would drag the mean up to 88 if counted
+          { score: 100, contextStatus: "insufficient_context" },
+          { score: 100, contextStatus: "insufficient_context" },
+          { score: 100, contextStatus: "insufficient_context" },
+        ],
+      },
+    });
+    await runDailyFinalization(deps);
+    const written = dailyScoreCreateCalls[0] as any;
+    assert.equal(written.sampleCount, 2, "only the two usable hours count");
+    assert.equal(written.averageScore, 70, "mean of 80 and 60, not of all five");
+  });
+
+  test("a day of ONLY insufficient_context samples creates NO DailySafetyScore row", async () => {
+    const { deps, dailyScoreCreateCalls } = makeHarness({
+      pilotDriverIds: ["driver-1"],
+      taggedSamplesByDriver: {
+        "driver-1": Array.from({ length: 24 }, () => ({ score: 100, contextStatus: "insufficient_context" })),
+      },
+    });
+    const result = await runDailyFinalization(deps);
+    // The pre-existing "no_samples" skip now also covers "nothing usable" —
+    // an honest gap instead of a fabricated perfect day.
+    assert.deepEqual(result.results[0].safetyScore, { status: "skipped", reason: "no_samples" });
+    assert.equal(dailyScoreCreateCalls.length, 0);
+  });
+
+  test("a full day of usable samples is completely unaffected", async () => {
+    const { deps, dailyScoreCreateCalls } = makeHarness({
+      pilotDriverIds: ["driver-1"],
+      taggedSamplesByDriver: {
+        "driver-1": Array.from({ length: 24 }, () => ({ score: 90, contextStatus: "partial_live" })),
+      },
+    });
+    await runDailyFinalization(deps);
+    const written = dailyScoreCreateCalls[0] as any;
+    assert.equal(written.sampleCount, 24);
+    assert.equal(written.averageScore, 90);
   });
 });
 

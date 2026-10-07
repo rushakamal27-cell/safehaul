@@ -114,6 +114,7 @@ import {
   type StreamSkipReason,
 } from "@/lib/providers/samsara/normalizeStreamEvent";
 import { syncProviderDriverName } from "@/lib/driverIdentity";
+import { normalizeProviderId } from "@/lib/providers/providerIds";
 import {
   enrichNewDriverEvents,
   type EnrichmentStats,
@@ -491,7 +492,18 @@ export async function runSamsaraSafetyEventsSync(
       select: { externalDriverId: true },
       orderBy: { externalDriverId: "asc" },
     });
-    pilotDriverIds = mappings.map((m) => m.externalDriverId).sort();
+    // Normalize before these IDs leave for Samsara (Phase 6D closure):
+    // externalDriverId is provisioned out-of-band and nothing validates it on
+    // the way in, so a CRLF/whitespace artifact — the exact contamination
+    // found on a pilot's externalVehicleId on 2026-09-01 — would be
+    // serialized straight into the driverIds query parameter and could fail
+    // the request for the whole pilot roster, not just that driver. An
+    // all-whitespace value normalizes to null and is dropped rather than sent
+    // as an empty ID. See lib/providers/providerIds.ts.
+    pilotDriverIds = mappings
+      .map((m) => normalizeProviderId(m.externalDriverId))
+      .filter((id): id is string => id !== null)
+      .sort();
   } catch (err) {
     console.error("[sync/samsara] Failed to fetch pilot driver mappings:", err);
     return {

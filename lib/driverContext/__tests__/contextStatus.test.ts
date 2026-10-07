@@ -88,6 +88,69 @@ describe("deriveContextStatus", () => {
     assert.equal(deriveContextStatus(ctx), "partial_live");
   });
 
+  // Phase 6D closure (2026-10-07) — UNKNOWN ≠ SAFE. A pilot whose Samsara
+  // vehicle never resolves gets no live speed/weather/zone at all (all three
+  // are gated on fresh location in assemble.ts), toRiskInput's `?? 0`
+  // neutral defaults then stand in for conditions, and the engine returns a
+  // perfect 100. Real production case: 1,005 samples, every one exactly
+  // 100.00, stddev 0.000.
+  test("no live positional input at all (speed+weather+zoneRisk unavailable) -> insufficient_context", () => {
+    const ctx = context({
+      speed: field<number>({ value: null, ...UNAVAILABLE }),
+      weather: field<number>({ value: null, ...UNAVAILABLE }),
+      zoneRisk: field<number>({ value: null, ...UNAVAILABLE }),
+      location: field<{ latitude: number; longitude: number }>({ value: null, ...UNAVAILABLE }),
+    });
+    assert.equal(deriveContextStatus(ctx), "insufficient_context");
+  });
+
+  test("HOS alone unavailable NEVER means insufficient_context — it is unavailable fleet-wide", () => {
+    const ctx = context({ hos: field<number>({ value: null, ...UNAVAILABLE }) });
+    assert.equal(deriveContextStatus(ctx), "partial_live");
+  });
+
+  test("the real pilot shape today (live GPS/speed/weather/zone, dead HOS) stays partial_live, not insufficient", () => {
+    const ctx = context({
+      safetyEvents: field({ value: [], ...OBSERVED_FRESH }),
+      hos: field<number>({ value: null, ...UNAVAILABLE }),
+      speed: field({ value: 67.1, ...OBSERVED_FRESH }),
+      weather: field({ value: 0.16, ...OBSERVED_FRESH }),
+      zoneRisk: field({ value: 0, ...OBSERVED_FRESH }),
+    });
+    assert.equal(deriveContextStatus(ctx), "partial_live");
+  });
+
+  test("even ONE live positional input keeps it partial_live, not insufficient", () => {
+    const ctx = context({
+      speed: field({ value: 55, ...OBSERVED_FRESH }),
+      weather: field<number>({ value: null, ...UNAVAILABLE }),
+      zoneRisk: field<number>({ value: null, ...UNAVAILABLE }),
+      hos: field<number>({ value: null, ...UNAVAILABLE }),
+    });
+    assert.equal(deriveContextStatus(ctx), "partial_live");
+  });
+
+  test("a genuine zero reading is live data, not insufficient (stopped truck, outside curated zones)", () => {
+    const ctx = context({
+      speed: field({ value: 0, ...OBSERVED_FRESH }),
+      zoneRisk: field({ value: 0, ...OBSERVED_FRESH }),
+      weather: field({ value: 0, ...OBSERVED_FRESH }),
+      hos: field<number>({ value: null, ...UNAVAILABLE }),
+    });
+    assert.equal(deriveContextStatus(ctx), "partial_live");
+  });
+
+  test("demo is still classified demo, never insufficient_context (simulated fields are not 'live')", () => {
+    const ctx = context({
+      safetyEvents: field({ value: [], ...SIMULATED_FRESH }),
+      hos: field({ value: 5, ...SIMULATED_FRESH }),
+      speed: field({ value: 60, ...SIMULATED_FRESH }),
+      weather: field({ value: 0.2, ...SIMULATED_FRESH }),
+      zoneRisk: field({ value: 0.2, ...SIMULATED_FRESH }),
+    });
+    assert.equal(deriveContextStatus(ctx), "demo");
+  });
+
   test("location unavailable does not affect contextStatus (Phase 1 — location isn't in the field list yet)", () => {
     const ctx = context({ location: field<{ latitude: number; longitude: number }>({ value: null, ...UNAVAILABLE }) });
     assert.equal(deriveContextStatus(ctx), "full_live");

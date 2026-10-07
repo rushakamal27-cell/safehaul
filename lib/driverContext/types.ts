@@ -82,7 +82,15 @@ export interface ContextSources {
  * on a real pilot provider path. See lib/driverContext/contextStatus.ts for
  * the derivation rules.
  */
-export type ContextStatus = "full_live" | "partial_live" | "demo";
+/**
+ * `insufficient_context` (Phase 6D closure, 2026-10-07) means none of the
+ * three position-derived scoring inputs (speed, weather, zoneRisk) carried a
+ * live reading for this calculation — so whatever score was produced is not a
+ * measurement of conditions. Deliberately NOT gated on `hos`, which is
+ * unavailable fleet-wide (the pilot fleet uses a different ELD) and must
+ * never by itself invalidate a sample. See contextStatus.ts.
+ */
+export type ContextStatus = "full_live" | "partial_live" | "insufficient_context" | "demo";
 
 /**
  * Transparency-only breakdown of the driver's current HOS state, exposed
