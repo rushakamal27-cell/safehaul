@@ -114,6 +114,26 @@ export const SAMSARA_TYPE_MAP: Readonly<Record<string, DriverEventType>> = {
   // an observed outcome, not treated as a predictive precursor yet).
   Crash:                   "crash",
   crash:                   "crash",
+  // Confirmed live 2026-10-07 (Phase 6D audit) against real pilot org data:
+  // 4 stored RawProviderEvent rows for mapped, active pilot drivers carried
+  // behaviorLabels: [{ label: "GenericDistraction" }] and had no case here,
+  // so they were skipped as "unsupported_behavior_label" — the raw payloads
+  // were preserved but no DriverEvent was ever created (same silent-loss
+  // shape as the Crash gap found in August). "GenericDistraction" is
+  // Samsara's v2 label for the camera-detected distraction family that the
+  // already-existing "Inattentive"/"InattentiveDriving" entries above were
+  // meant to cover, so it maps to the same internal type — no new event
+  // type, no risk-engine change (inattentive_driving is already scored in
+  // lib/riskEngine.ts::calcSafetyEventPenalties).
+  GenericDistraction:      "inattentive_driving",
+  genericDistraction:      "inattentive_driving",
+  // NOT mapped, deliberately: Samsara also emits "Drowsy" (observed once,
+  // 2026-09-15, Roman). Drowsiness is a FATIGUE signal, and SafeHaul already
+  // models fatigue as its own risk factor driven by HOS — folding it into
+  // inattentive_driving/distraction would misattribute the signal and
+  // corrupt feature semantics for future ML. Its raw payload is preserved in
+  // RawProviderEvent and remains replayable once a drowsiness/fatigue event
+  // type is deliberately designed. See Phase 6D report.
 };
 
 // ---------------------------------------------------------------------------

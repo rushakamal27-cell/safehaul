@@ -70,6 +70,59 @@ describe("normalizeSafetyStreamEvent — Crash", () => {
   });
 });
 
+// Phase 6D (2026-10-07) found the same silent-loss shape as the Crash gap:
+// 4 real RawProviderEvent rows for mapped, active pilot drivers carried
+// behaviorLabels: [{ label: "GenericDistraction", source: "SYSTEM" }] and
+// were skipped as "unsupported_behavior_label", so no DriverEvent existed
+// for them. Fixture trimmed from the real stored payload
+// (externalEventId "5445cfb0-a7eb-564d-8010-2851056e4998", Rushana,
+// 2026-09-23).
+function realGenericDistractionFixture(): SamsaraSafetyStreamEvent {
+  return {
+    id: "5445cfb0-a7eb-564d-8010-2851056e4998",
+    asset: { id: "281475006503539" },
+    driver: { id: "51056167" },
+    startMs: "2026-09-23T19:14:16.171Z",
+    endMs: "2026-09-23T19:14:16.171Z",
+    behaviorLabels: [{ label: "GenericDistraction", source: "SYSTEM" }],
+  };
+}
+
+describe("normalizeSafetyStreamEvent — GenericDistraction", () => {
+  test("the real Sep 23 GenericDistraction event normalizes to 'inattentive_driving'", () => {
+    const result = normalizeSafetyStreamEvent(realGenericDistractionFixture());
+
+    assert.equal(result.skipReason, undefined);
+    assert.ok(result.event, "must produce a normalized event, not a skip");
+    assert.equal(result.event!.type, "inattentive_driving");
+    assert.equal(result.event!.externalDriverId, "51056167");
+    assert.equal(result.event!.externalVehicleId, "281475006503539");
+    assert.equal(result.event!.timestamp, "2026-09-23T19:14:16.171Z");
+  });
+
+  test("camelCase 'genericDistraction' variant also normalizes (defensive casing)", () => {
+    const result = normalizeSafetyStreamEvent({
+      ...realGenericDistractionFixture(),
+      behaviorLabels: [{ label: "genericDistraction", source: "SYSTEM" }],
+    });
+    assert.equal(result.event?.type, "inattentive_driving");
+  });
+
+  test("'Drowsy' remains deliberately UNMAPPED — fatigue must not be folded into distraction", () => {
+    const result = normalizeSafetyStreamEvent({
+      ...realGenericDistractionFixture(),
+      behaviorLabels: [{ label: "Drowsy", source: "SYSTEM" }],
+    });
+    // Intentional: SafeHaul models fatigue separately (HOS-driven). Mapping
+    // Drowsy into inattentive_driving would misattribute the signal and
+    // corrupt feature semantics for future ML. The RawProviderEvent is still
+    // preserved and replayable once a fatigue event type is designed.
+    assert.equal(result.event, null);
+    assert.equal(result.skipReason, "unsupported_behavior_label");
+    assert.deepEqual(result.observedLabels, ["Drowsy"]);
+  });
+});
+
 describe("normalizeSafetyStreamEvent — existing mappings unchanged (regression guard)", () => {
   test("SevereSpeeding -> speeding, still works exactly as before", () => {
     const result = normalizeSafetyStreamEvent({
