@@ -8,8 +8,10 @@ import {
 } from "../quarantine";
 
 // The one real entry (Phase 6D closure): driver cmnq65l6c0001nytoxvfipwt9 had
-// context sourced from the wrong truck. Range 2026-09-04 inclusive through
-// 2026-10-07 inclusive (expressed as an exclusive 2026-10-08T00:00:00Z bound).
+// context sourced from the wrong truck. Range starts 2026-09-04T00:00:00Z
+// inclusive and ends at the exclusive, production-verified bound
+// 2026-10-07T17:20:03.621Z — the instant of her first observation confirmed to
+// cite TRUCK 284 (281475006503539) via vehicleIdSource "driver_event".
 const RUSHANA = "cmnq65l6c0001nytoxvfipwt9";
 const OTHER_DRIVER = "cmnqiauan00011bod8vd2f0kz"; // Temurbek — never quarantined
 
@@ -33,6 +35,53 @@ describe("isHistoricalDataQuarantined — Rushana wrong_vehicle_attribution rang
     assert.equal(q(RUSHANA, "DriverObservation", "2026-10-08T00:00:00.000Z"), false);
   });
 
+  test("the last confirmed contaminated observation is quarantined", () => {
+    // Production: providerVehicleId 281474991238949 ("TRUCK 226"),
+    // vehicleIdSource "provider_mapping", 1,533 mi from her own events.
+    assert.equal(q(RUSHANA, "DriverObservation", "2026-10-07T17:00:03.191Z"), true);
+  });
+
+  test("the last confirmed contaminated sample is quarantined (hourBucket 17:00Z)", () => {
+    assert.equal(q(RUSHANA, "SafetyScoreSample", "2026-10-07T17:00:00.000Z"), true);
+  });
+
+  test("the first confirmed CLEAN observation is admitted — it IS the exclusive bound", () => {
+    // Production: providerVehicleId 281475006503539 ("TRUCK 284"),
+    // vehicleIdSource "driver_event".
+    assert.equal(q(RUSHANA, "DriverObservation", "2026-10-07T17:20:03.621Z"), false);
+  });
+
+  test("one millisecond BEFORE the clean row is still quarantined (exclusive-end precision)", () => {
+    assert.equal(q(RUSHANA, "DriverObservation", "2026-10-07T17:20:03.620Z"), true);
+  });
+
+  test("the first admitted sample (hourBucket 18:00Z, verified clean) is NOT quarantined", () => {
+    assert.equal(q(RUSHANA, "SafetyScoreSample", "2026-10-07T18:00:00.000Z"), false);
+  });
+
+  test("her verified-clean post-fix evening observations are admitted, not discarded", () => {
+    for (const iso of [
+      "2026-10-07T17:40:00.000Z",
+      "2026-10-07T18:20:03.281Z",
+      "2026-10-07T20:00:00.000Z",
+      "2026-10-07T23:59:59.999Z",
+    ]) {
+      assert.equal(q(RUSHANA, "DriverObservation", iso), false, `${iso} must be admitted`);
+    }
+  });
+
+  test("the 2026-10-07 daily rows stay quarantined — that day mixes 18 contaminated hours with 6 clean ones", () => {
+    // Daily buckets are UTC midnight, which is below the bound, so the mixed
+    // day is correctly excluded rather than partially trusted.
+    assert.equal(q(RUSHANA, "DailySafetyScore", "2026-10-07T00:00:00.000Z"), true);
+    assert.equal(q(RUSHANA, "DailyDrivingSummary", "2026-10-07T00:00:00.000Z"), true);
+  });
+
+  test("the 2026-10-08 daily rows are admitted — first fully post-fix day", () => {
+    assert.equal(q(RUSHANA, "DailySafetyScore", "2026-10-08T00:00:00.000Z"), false);
+    assert.equal(q(RUSHANA, "DailyDrivingSummary", "2026-10-08T00:00:00.000Z"), false);
+  });
+
   test("a much earlier date for the same driver is clean", () => {
     assert.equal(q(RUSHANA, "SafetyScoreSample", "2026-08-15T12:00:00.000Z"), false);
   });
@@ -53,24 +102,35 @@ describe("isHistoricalDataQuarantined — UTC boundary correctness", () => {
     assert.equal(q(RUSHANA, "DriverObservation", "2026-09-03T23:59:59.999Z"), false);
   });
 
-  test("the final millisecond of the last covered day (2026-10-07) is INCLUDED", () => {
-    assert.equal(q(RUSHANA, "DriverObservation", "2026-10-07T23:59:59.999Z"), true);
+  test("the final millisecond before the exclusive bound is INCLUDED", () => {
+    assert.equal(q(RUSHANA, "DriverObservation", "2026-10-07T17:20:03.620Z"), true);
   });
 
   test("the exclusive end instant itself is excluded", () => {
-    assert.equal(q(RUSHANA, "DriverObservation", "2026-10-08T00:00:00.000Z"), false);
+    assert.equal(q(RUSHANA, "DriverObservation", "2026-10-07T17:20:03.621Z"), false);
   });
 
-  test("a UTC-midnight daily-row date on the last covered day is included", () => {
+  test("the bound is millisecond-precise, not rounded to the second or minute", () => {
+    // A bound rounded down to 17:20:03.000Z or 17:20:00.000Z would wrongly
+    // admit rows in the preceding fraction; one rounded up to 17:20:04.000Z
+    // would wrongly quarantine the verified-clean row itself.
+    assert.equal(q(RUSHANA, "DriverObservation", "2026-10-07T17:20:03.000Z"), true);
+    assert.equal(q(RUSHANA, "DriverObservation", "2026-10-07T17:20:00.000Z"), true);
+    assert.equal(q(RUSHANA, "DriverObservation", "2026-10-07T17:20:03.622Z"), false);
+  });
+
+  test("a UTC-midnight daily-row date below the bound is included", () => {
     // DailySafetyScore / DailyDrivingSummary buckets are UTC midnight.
     assert.equal(q(RUSHANA, "DailySafetyScore", "2026-10-07T00:00:00.000Z"), true);
     assert.equal(q(RUSHANA, "DailyDrivingSummary", "2026-10-07T00:00:00.000Z"), true);
   });
 
-  test("comparison is on absolute instants, not local wall-clock — a late-UTC-evening row inside the range still matches", () => {
-    // 2026-10-07T23:30Z is 2026-10-08 in some local zones; must still match.
-    assert.equal(q(RUSHANA, "SafetyScoreSample", "2026-10-07T23:30:00.000Z"), true);
-    // ...and an instant just past the bound must not, regardless of zone.
+  test("comparison is on absolute instants, not local wall-clock", () => {
+    // 2026-10-07T17:20:03.620Z is a different calendar date in some local
+    // zones; classification must depend only on the absolute instant.
+    assert.equal(q(RUSHANA, "SafetyScoreSample", "2026-10-07T17:00:00.000Z"), true);
+    assert.equal(q(RUSHANA, "SafetyScoreSample", "2026-10-07T18:00:00.000Z"), false);
+    // An instant well past the bound must not match, regardless of zone.
     assert.equal(q(RUSHANA, "SafetyScoreSample", "2026-10-08T00:00:00.001Z"), false);
   });
 });
