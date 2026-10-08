@@ -27,25 +27,6 @@ export async function isPilotDriver(driverId: string): Promise<boolean> {
   return mapping !== null;
 }
 
-/**
- * Returns true if the driver has a DriverProviderMapping row at all —
- * regardless of its isPilot/isActive flags.
- *
- * This is deliberately NOT the same question as isPilotDriver(). It
- * distinguishes a genuine demo user (never mapped to any provider) from a
- * deactivated or former pilot (mapped, but no longer flagged pilot/active).
- * Both answer `false` to isPilotDriver, but only the former should be treated
- * as a demo account — see lib/riskPersistence.ts for why that distinction
- * matters. Uses the existing @@index([driverId]) on DriverProviderMapping.
- */
-export async function hasProviderMapping(driverId: string): Promise<boolean> {
-  const mapping = await prisma.driverProviderMapping.findFirst({
-    where: { driverId },
-    select: { id: true },
-  });
-  return mapping !== null;
-}
-
 // ---------------------------------------------------------------------------
 // Event retrieval
 // ---------------------------------------------------------------------------

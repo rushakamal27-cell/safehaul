@@ -873,9 +873,10 @@ describe("assembleDriverContext's single-`now` guarantee (N1 — one calculation
 // The first two are indistinguishable to this module by design: isPilotDriver
 // already collapses "no mapping" and "mapping without isPilot+isActive" into
 // the same false. That is the point — assemble.ts must not need to know which
-// kind of non-pilot it is looking at, so neither can drift from the other.
-// The DIFFERENCE between them lives in lib/driverEvents.ts::hasProviderMapping
-// and is tested in lib/__tests__/riskPersistence.test.ts.
+// kind of non-pilot it is looking at, so neither can drift from the other,
+// and nothing downstream needs to tell them apart any more either (the
+// predicate that once did, lib/riskPersistence.ts, is gone along with the
+// synthetic writes it gated).
 describe("Remove Implicit Demo Fallback — non-pilot drivers get no simulated values", () => {
   const NOW_ISO = "2026-10-08T12:00:00.000Z";
 

@@ -5,6 +5,16 @@
  * Each scenario covers a distinct risk profile that exercises a different
  * branch of the risk engine, so the app can demonstrate all four risk levels.
  *
+ * RETAINED FOR TESTS AND A POSSIBLE FUTURE EXPLICIT DEMO MODE ONLY (Remove
+ * Implicit Demo Fallback, 2026-10-08). Nothing in a normal request path
+ * imports this module or lib/samsara.ts's getMock* getters any more. These
+ * scenarios used to be selected IMPLICITLY, by hashing the driverId of any
+ * user who lacked a provider mapping, which is how real people came to see
+ * fabricated scores, mileage, events and risk zones presented as their own.
+ * Scenario 2's milesDrivenToday of 487 is the value that was found written
+ * to a production Trip row. If you reconnect this to a request path, make it
+ * an explicit opt-in flag — never a fallback triggered by absent data.
+ *
  * Scenario selection (in priority order):
  *   1. MOCK_SCENARIO=<index> env var — force a specific scenario (dev/testing)
  *   2. Deterministic hash of driverId — consistent per driver, varied across drivers

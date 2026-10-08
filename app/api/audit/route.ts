@@ -96,8 +96,9 @@ export async function GET(request: NextRequest) {
   });
 
   // Legacy-transition dedup (Part 10): /api/risk stopped writing new
-  // ComplianceScore/Trip rows for pilot drivers on cutover — see
-  // lib/riskPersistence.ts — but a driver who opened the app on the
+  // ComplianceScore/Trip rows for pilot drivers on cutover (and, as of
+  // Remove Implicit Demo Fallback 2026-10-08, stopped writing them for
+  // EVERY driver) — but a driver who opened the app on the
   // cutover's own UTC day may already have a partial legacy row for that
   // same day, which the autonomous finalizer will ALSO produce a
   // DailySafetyScore/DailyDrivingSummary row for once that day ends. Rather
