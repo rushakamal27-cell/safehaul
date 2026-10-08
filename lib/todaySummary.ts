@@ -25,8 +25,6 @@
  */
 
 import { prisma } from "@/lib/prisma";
-import { getScenarioForDriver } from "@/lib/mockScenarios";
-import { getMockTripStats } from "@/lib/samsara";
 import { fetchVehicleOdometerReadings, odometerDeltaMiles } from "@/lib/providers/samsara/vehicleStats";
 import { resolveCurrentVehicleId } from "@/lib/providers/samsara/vehicleId";
 
@@ -67,16 +65,26 @@ async function resolveChecksPassed(
   }
 }
 
-async function resolveMilesDriven(
+/**
+ * Exported for tests: the isPilot=false path returns before any I/O, so the
+ * "non-pilots never get fabricated mileage" guarantee is directly assertable
+ * with no Prisma/Samsara harness. The isPilot=true path is unchanged and
+ * still hits the provider, so it is not unit-tested here.
+ */
+export async function resolveMilesDriven(
   driverId: string,
   isPilot: boolean,
   dayStart: Date,
   dayEnd: Date
 ): Promise<{ milesDriven: number | null; status: DataAvailability }> {
-  if (!isPilot) {
-    const scenario = getScenarioForDriver(driverId);
-    return { milesDriven: Math.round(getMockTripStats(scenario).milesDrivenToday), status: "available" };
-  }
+  // Remove Implicit Demo Fallback (2026-10-08): the former non-pilot branch
+  // returned a mock scenario constant (156/203/487/621 mi) reported as
+  // "available" — the single most visible fabricated number in the product.
+  // A driver with no active pilot mapping has no odometer to read, so
+  // mileage is unavailable and the UI renders "—" (it already handles null,
+  // see DashboardScreen's mileage tile). checksPassed is NOT affected: that
+  // is a real Inspection row count and stays available for every driver.
+  if (!isPilot) return { milesDriven: null, status: "unavailable" };
 
   const { vehicleId } = await resolveCurrentVehicleId(driverId);
   if (!vehicleId) return { milesDriven: null, status: "unavailable" };
