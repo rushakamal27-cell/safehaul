@@ -1,17 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { calculateRisk, resolveLevel } from "@/lib/riskEngine";
-import { nextRunningAverage } from "@/lib/complianceScoreAverage";
-import { getDriverVehicleContext } from "@/lib/samsara";
-import { isPilotDriver, hasProviderMapping } from "@/lib/driverEvents";
+import { calculateRisk } from "@/lib/riskEngine";
+import { isPilotDriver } from "@/lib/driverEvents";
 import { assembleDriverContext } from "@/lib/driverContext/assemble";
 import { toRiskInput } from "@/lib/driverContext/toRiskInput";
 import { toContextSources } from "@/lib/driverContext/toContextSources";
 import { deriveContextStatus, deriveDataCompleteness } from "@/lib/driverContext/contextStatus";
 import { fetchTodaySummaryData } from "@/lib/todaySummary";
-import { prisma } from "@/lib/prisma";
-import { Prisma } from "@/lib/generated/prisma";
-import { getOrCreateTodayTrip } from "@/lib/trip";
-import { shouldPersistDailyHistory } from "@/lib/riskPersistence";
+import { isRiskScoreable } from "@/lib/riskScoreability";
 import type { ApiErrorResponse } from "@/lib/api/common";
 import type { RiskApiResponse } from "@/lib/api/risk";
 
@@ -49,38 +44,14 @@ export async function GET(request: NextRequest): Promise<NextResponse<RiskApiRes
 }
 
 async function buildRiskResponse(driverId: string): Promise<NextResponse<RiskApiResponse>> {
-  // Two independent facts, fetched in parallel so this costs no extra
-  // latency: is this an ACTIVE pilot, and does the driver have a provider
-  // mapping of any kind? They differ exactly for a deactivated/former pilot.
-  const [pilotDriver, driverHasProviderMapping] = await Promise.all([
-    isPilotDriver(driverId),
-    hasProviderMapping(driverId),
-  ]);
-  // Single source of truth for "may this call write daily historical Audit
-  // records" — see lib/riskPersistence.ts. False for pilot drivers: their
-  // history is now owned exclusively by the autonomous
-  // lib/riskSampling/ pipeline (hourly SafetyScoreSample -> daily
-  // DailySafetyScore/DailyDrivingSummary), never by this route. Also false
-  // for a deactivated/former pilot, who has a mapping but is no longer
-  // flagged active — deactivation must stop collection, never fall back to
-  // synthetic demo writes. True only for a genuine demo driver with no
-  // provider mapping at all, who has no autonomous collection pipeline —
-  // Trip/ComplianceScore remain their only history source, unchanged.
-  const persistDailyHistory = shouldPersistDailyHistory({
-    pilotDriver,
-    hasProviderMapping: driverHasProviderMapping,
-  });
+  // Remove Implicit Demo Fallback (2026-10-08): pilot status is now the ONLY
+  // thing this route needs to know about the driver. It no longer asks
+  // whether a provider mapping exists at all, because nothing downstream
+  // writes synthetic history any more — see this file's header.
+  const pilotDriver = await isPilotDriver(driverId);
 
-  // getOrCreateTodayTrip is only needed for the demo (non-pilot) SafetyEvent
-  // write below — a pilot driver must not get a Trip row created just from
-  // opening the dashboard (that's exactly the app-open-creates-history
-  // pattern this correction removes). /api/incident and /api/inspect still
-  // call getOrCreateTodayTrip independently for real driver-initiated
-  // events, for any driver — that is unaffected by this change.
-  const [assembled, vehicle, tripId, summaryData] = await Promise.all([
+  const [assembled, summaryData] = await Promise.all([
     assembleDriverContext(driverId, pilotDriver),
-    getDriverVehicleContext(driverId),
-    persistDailyHistory ? getOrCreateTodayTrip(driverId) : Promise.resolve(null),
     fetchTodaySummaryData(driverId, pilotDriver),
   ]);
 
@@ -89,111 +60,46 @@ async function buildRiskResponse(driverId: string): Promise<NextResponse<RiskApi
   const contextSources = toContextSources(context);
   const contextStatus = deriveContextStatus(context);
   const dataCompleteness = deriveDataCompleteness(context);
-  const result = calculateRisk(input);
-  const alertsActive = result.factors.length;
+  // UNKNOWN != SAFE. toRiskInput substitutes neutral `?? 0` defaults for
+  // missing fields, and calculateRisk cannot tell "measured zero risk" from
+  // "measured nothing" — an entirely empty context scores 100/LOW/no factors
+  // (asserted against the real engine in lib/__tests__/riskScoreability.test.ts).
+  // So the score is withheld, not computed-then-hidden, whenever the context
+  // was classified insufficient_context. This covers BOTH a user with no
+  // active pilot mapping and an ACTIVE pilot whose GPS could not be resolved
+  // this call: a real driver we cannot assess right now must not be told
+  // they are safe either.
+  const scoreable = isRiskScoreable(contextStatus);
+  const result = scoreable ? calculateRisk(input) : null;
 
-  const today = new Date();
-  today.setUTCHours(0, 0, 0, 0);
+  // alertsActive counts risk factors, so with no score there are no factors
+  // to count. Reported as unavailable rather than 0 — "no alerts" and "we
+  // don't know whether there are alerts" must not render identically.
+  const alertsActive = result ? result.factors.length : null;
 
-  if (persistDailyHistory) {
-    // Demo (non-pilot) only, from here through the SafetyEvent write below.
-    // `tripId`/`today` are guaranteed non-null/defined in this branch —
-    // persistDailyHistory is exactly the condition getOrCreateTodayTrip
-    // above was called under.
-
-    // Stamp current mileage and environmental snapshot on the active trip.
-    // Updated on every call — mileage accumulates, conditions change.
-    // `vehicle` (getDriverVehicleContext) is 100% mock scenario data for a
-    // demo driver, the only case this branch runs under.
-    await prisma.trip.update({
-      where: { id: tripId! },
-      data:  {
-        ...(summaryData.milesDriven !== null ? { milesDriven: summaryData.milesDriven } : {}),
-        weatherData: {
-          weatherRisk:   vehicle.weatherRisk,
-          zoneRisk:      vehicle.zoneRisk,
-          locationLabel: vehicle.locationLabel,
-          zoneName:      vehicle.zoneName,
-        },
-      },
-    });
-
-    // Persist one ComplianceScore row per driver per UTC calendar day, whose
-    // `score` is a running arithmetic mean of every /api/risk calculation
-    // that day (see lib/complianceScoreAverage.ts) — not just the first.
-    // Race-safe without a large locking system: the day's first calculation
-    // always attempts a plain create(); every later calculation (that or any
-    // other concurrent request) hits the @@unique([driverId, date])
-    // constraint, catches the P2002, and folds its score into the existing
-    // row inside a transaction that takes a Postgres row lock
-    // (`SELECT ... FOR UPDATE`) before computing the next average — so two
-    // concurrent requests can never both read the same pre-update state and
-    // silently drop one sample.
-    try {
-      await prisma.complianceScore.create({
-        data: {
-          driverId,
-          date:          today,
-          score:         result.score,
-          sampleCount:   1,
-          dangerLevel:   result.level,
-          breakdownJson: result.factors as unknown as Prisma.InputJsonValue,
-        },
-      });
-    } catch (err) {
-      const isUniqueConstraintViolation =
-        err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002";
-      if (!isUniqueConstraintViolation) throw err;
-
-      await prisma.$transaction(async (tx) => {
-        const rows = await tx.$queryRaw<{ score: number; sampleCount: number }[]>`
-          SELECT score, "sampleCount" FROM "ComplianceScore"
-          WHERE "driverId" = ${driverId} AND date = ${today}
-          FOR UPDATE
-        `;
-        const current = rows[0];
-        // Row was just proven to exist by the P2002 above; nothing else
-        // deletes ComplianceScore rows. Defensive only.
-        if (!current) return;
-
-        const { average, sampleCount } = nextRunningAverage(current.score, current.sampleCount, result.score);
-        // breakdownJson intentionally left untouched here — it still
-        // reflects the day's first calculation's factor breakdown, same
-        // simplification this row already made before this change
-        // (single-snapshot, not an aggregate). Averaging per-factor
-        // breakdowns is out of scope.
-        await tx.complianceScore.update({
-          where: { driverId_date: { driverId, date: today } },
-          data:  { score: average, sampleCount, dangerLevel: resolveLevel(average) },
-        });
-      });
-    }
-
-    // Persist today's safety events for non-pilot drivers only.
-    // Pilot drivers: real events live in DriverEvent (via webhook pipeline) — no duplication.
-    // Guard prevents re-writing identical scenario events on repeated refreshes.
-    if (input.safetyEvents.length > 0) {
-      const existingEvent = await prisma.safetyEvent.findFirst({
-        where: { driverId, timestamp: { gte: today } },
-        select: { id: true },
-      });
-
-      if (!existingEvent) {
-        const now = new Date();
-        await prisma.safetyEvent.createMany({
-          data: input.safetyEvents.map((ev) => ({
-            driverId,
-            tripId: tripId!,
-            eventType: ev.type,
-            severity:  String(ev.severity),
-            timestamp: now,
-            lat:       vehicle.lat,
-            lng:       vehicle.lng,
-          })),
-        });
-      }
-    }
-  }
+  // Remove Implicit Demo Fallback (2026-10-08): the synthetic daily-history
+  // block that used to live here is GONE for every driver.
+  //
+  // It ran for any driver with no provider mapping and wrote, on every single
+  // dashboard open: a Trip row stamped with a MOCK mileage constant and a
+  // mock weather/zone snapshot, a ComplianceScore whose `score` was the
+  // running mean of scores computed from fabricated inputs, and SafetyEvent
+  // rows invented from the driverId-hashed scenario. Those rows then flowed
+  // into the Audit screen and were indistinguishable, in shape, from real
+  // telematics history — the Trip row carrying 487 mock miles that started
+  // this whole investigation was written by exactly this code.
+  //
+  // Nothing replaces it. Pilot drivers' history is owned by the autonomous
+  // lib/riskSampling/ pipeline (hourly SafetyScoreSample -> daily
+  // DailySafetyScore/DailyDrivingSummary); non-pilot drivers now have no
+  // history, which is the correct amount of history to have for a driver we
+  // have no data about. Opening the app is a read, and no longer writes
+  // anything at all.
+  //
+  // Still untouched and still correct: /api/incident and /api/inspect call
+  // getOrCreateTodayTrip independently for real driver-INITIATED events, for
+  // any driver. Those are genuine user actions producing genuine records,
+  // not fabrications, so they are out of scope here.
 
   return NextResponse.json({
     driverId,
@@ -205,7 +111,12 @@ async function buildRiskResponse(driverId: string): Promise<NextResponse<RiskApi
     // docs/data-freshness.md.
     timestamp:  assembled.calculatedAt,
     // dataSource: which connection path this driver is on (pilot provider vs.
-    // demo). Kept for backward compatibility — do not rename/remove yet.
+    // not). Kept for backward compatibility — do not rename/remove yet.
+    // NOTE (Remove Implicit Demo Fallback, 2026-10-08): "mock" no longer
+    // means the response CONTAINS mock data — it cannot any more. It now
+    // means only "this driver has no active pilot mapping," and such a
+    // response carries unavailable fields and result: null. The name is
+    // retained to avoid breaking existing clients; prefer contextStatus.
     // contextStatus is the field that should be trusted for "is this score
     // actually live": a pilot driver can be dataSource "real" while still
     // partial_live if any single field (safety events, HOS, speed, weather,
@@ -255,7 +166,10 @@ async function buildRiskResponse(driverId: string): Promise<NextResponse<RiskApi
       dataStatus: {
         checks:   summaryData.dataStatus.checks,
         mileage:  summaryData.dataStatus.mileage,
-        alerts:   "available",
+        // Was hardcoded "available" — true only while a score always
+        // existed. Now tracks whether there was a score to derive alerts
+        // from (Remove Implicit Demo Fallback, 2026-10-08).
+        alerts:   result ? "available" : "unavailable",
       },
     },
     input,

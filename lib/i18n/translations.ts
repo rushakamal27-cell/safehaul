@@ -79,6 +79,15 @@ export const translations = {
     fieldEvents24h: "Events (24h)",
     demoDisclosure:
       "This account uses simulated driving data for demonstration. Connected fleet drivers receive real telematics data.",
+    // Remove Implicit Demo Fallback (2026-10-08). Shown in place of the
+    // score when no score could be calculated. Deliberately states what is
+    // missing and what to do about it, and deliberately does NOT reassure:
+    // the whole point is that we do not know whether this driver is safe.
+    scoreUnavailable: "Safety score unavailable",
+    scoreUnavailableNoProvider:
+      "This account isn't connected to a telematics provider, so there's no driving data to assess. Connect a vehicle to start receiving a real safety score.",
+    scoreUnavailableNoContext:
+      "No current vehicle data could be retrieved, so a safety score can't be calculated right now. This usually resolves once the vehicle reports its position again.",
     andJoiner: "and",
 
     // ── Audit ───────────────────────────────────────────────────────────
@@ -233,6 +242,11 @@ export const translations = {
     fieldEvents24h: "События (24ч)",
     demoDisclosure:
       "Этот аккаунт использует смоделированные данные вождения для демонстрации. Подключённые водители получают реальные телематические данные.",
+    scoreUnavailable: "Оценка безопасности недоступна",
+    scoreUnavailableNoProvider:
+      "Этот аккаунт не подключён к телематическому провайдеру, поэтому нет данных о вождении для оценки. Подключите транспортное средство, чтобы получать реальную оценку безопасности.",
+    scoreUnavailableNoContext:
+      "Не удалось получить текущие данные транспортного средства, поэтому оценка безопасности пока не может быть рассчитана. Обычно это решается, когда транспортное средство снова сообщит своё местоположение.",
     andJoiner: "и",
 
     // ── Audit ───────────────────────────────────────────────────────────
