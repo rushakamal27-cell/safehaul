@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { calculateRisk, resolveLevel } from "@/lib/riskEngine";
 import { nextRunningAverage } from "@/lib/complianceScoreAverage";
 import { getDriverVehicleContext } from "@/lib/samsara";
-import { isPilotDriver } from "@/lib/driverEvents";
+import { isPilotDriver, hasProviderMapping } from "@/lib/driverEvents";
 import { assembleDriverContext } from "@/lib/driverContext/assemble";
 import { toRiskInput } from "@/lib/driverContext/toRiskInput";
 import { toContextSources } from "@/lib/driverContext/toContextSources";
@@ -49,16 +49,27 @@ export async function GET(request: NextRequest): Promise<NextResponse<RiskApiRes
 }
 
 async function buildRiskResponse(driverId: string): Promise<NextResponse<RiskApiResponse>> {
-  const pilotDriver = await isPilotDriver(driverId);
+  // Two independent facts, fetched in parallel so this costs no extra
+  // latency: is this an ACTIVE pilot, and does the driver have a provider
+  // mapping of any kind? They differ exactly for a deactivated/former pilot.
+  const [pilotDriver, driverHasProviderMapping] = await Promise.all([
+    isPilotDriver(driverId),
+    hasProviderMapping(driverId),
+  ]);
   // Single source of truth for "may this call write daily historical Audit
   // records" — see lib/riskPersistence.ts. False for pilot drivers: their
   // history is now owned exclusively by the autonomous
   // lib/riskSampling/ pipeline (hourly SafetyScoreSample -> daily
-  // DailySafetyScore/DailyDrivingSummary), never by this route. True for
-  // demo (non-pilot) drivers, who have no autonomous collection pipeline —
-  // Trip/ComplianceScore remain their only history source, unchanged from
-  // before this correction.
-  const persistDailyHistory = shouldPersistDailyHistory(pilotDriver);
+  // DailySafetyScore/DailyDrivingSummary), never by this route. Also false
+  // for a deactivated/former pilot, who has a mapping but is no longer
+  // flagged active — deactivation must stop collection, never fall back to
+  // synthetic demo writes. True only for a genuine demo driver with no
+  // provider mapping at all, who has no autonomous collection pipeline —
+  // Trip/ComplianceScore remain their only history source, unchanged.
+  const persistDailyHistory = shouldPersistDailyHistory({
+    pilotDriver,
+    hasProviderMapping: driverHasProviderMapping,
+  });
 
   // getOrCreateTodayTrip is only needed for the demo (non-pilot) SafetyEvent
   // write below — a pilot driver must not get a Trip row created just from
