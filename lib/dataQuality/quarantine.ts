@@ -87,24 +87,41 @@ const CONTEXT_DERIVED: readonly QuarantinableDataType[] = [
  *   range is used on purpose — an over-inclusive quarantine costs some usable
  *   days, an under-inclusive one poisons the dataset.
  *
- *   !! BOUND MUST BE EXTENDED !! The end bound below is the audit date. The
- *   corrective change to lib/providers/samsara/vehicleId.ts is not deployed to
- *   production as of this writing, so wrong-vehicle context is still being
- *   written. When it ships, move `toExclusive` to the deploy instant (or set it
- *   to null until then).
+ *   END BOUND IS FINAL, and is data-derived rather than taken from the deploy
+ *   timestamp (2026-10-07T17:06:08Z). The fix shipped in that deploy, but the
+ *   narrowest defensible bound is the first row positively verified clean, not
+ *   the moment the build went live — a cron run already in flight could in
+ *   principle still have written with the old code. Verified in production:
+ *     - last contaminated observation: 2026-10-07T17:00:03.191Z
+ *       (providerVehicleId 281474991238949 / "TRUCK 226",
+ *        vehicleIdSource "provider_mapping", 1,533 mi from her own events)
+ *     - last contaminated sample:      hourBucket 2026-10-07T17:00:00.000Z
+ *       (sampledAt 17:05:02.585Z, 66 s before the merge)
+ *     - ZERO rows of any kind written in between
+ *     - first clean observation:       2026-10-07T17:20:03.621Z
+ *       (providerVehicleId 281475006503539 / "TRUCK 284",
+ *        vehicleIdSource "driver_event") — this instant is the bound
+ *     - first admitted sample:         hourBucket 2026-10-07T18:00:00.000Z
+ *       (partial_live, dataCompleteness 5/6, all-fresh observed context)
+ *     - all 32 post-bound observations cite TRUCK 284; none cite TRUCK 226
+ *   Because toExclusive is exclusive, the bound admits exactly the first
+ *   verified-clean row onward and quarantines everything before it.
  */
 export const QUARANTINE_ENTRIES: readonly QuarantineEntry[] = [
   {
     driverId: "cmnq65l6c0001nytoxvfipwt9",
     fromInclusive: new Date("2026-09-04T00:00:00.000Z"),
-    toExclusive: new Date("2026-10-08T00:00:00.000Z"),
+    // First production row verified clean after the fix deployed — see the
+    // comment block above for the full evidence chain.
+    toExclusive: new Date("2026-10-07T17:20:03.621Z"),
     reason: "wrong_vehicle_attribution",
     affects: CONTEXT_DERIVED,
     note:
       "Stale DriverProviderMapping.externalVehicleId: context sourced from TRUCK 226 " +
       "(281474991238949) while the driver was operating TRUCK 284 (281475006503539). " +
       "Confirmed from 2026-09-21; 2026-09-04 to 2026-09-20 indeterminate and included " +
-      "deliberately. DriverEvent rows are unaffected and remain usable.",
+      "deliberately. Ends at the first post-fix observation verified to cite TRUCK 284 " +
+      "(2026-10-07T17:20:03.621Z). DriverEvent rows are unaffected and remain usable.",
   },
 ];
 
