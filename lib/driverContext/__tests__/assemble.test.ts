@@ -8,6 +8,7 @@ import {
   assembleWeather,
   assembleZoneRisk,
   assembleSpeed,
+  assembleHos,
   LOCATION_FRESH_THRESHOLD_MS,
   LOCATION_STALE_THRESHOLD_MS,
 } from "../assemble";
@@ -16,7 +17,6 @@ import type { RealWeatherResult } from "../../samsara";
 import type { VehicleLocation } from "../types";
 import type { ZoneMatch } from "../../providers/zones/zoneRisk";
 import type { ZoneDefinition } from "../../providers/zones/zoneData";
-import { getScenarioForDriver } from "../../mockScenarios";
 
 // These two functions are the pure, easily-isolated pieces of assemble.ts.
 // The rest of assembleDriverContext() is thin I/O orchestration over
@@ -241,19 +241,25 @@ describe("assembleLocation", () => {
     assert.notEqual(field.origin, "simulated");
   });
 
-  test("non-pilot preserves mock/demo behavior with simulated provenance", async () => {
-    const { field, detail } = await assembleLocation("mock-driver-id", false, NOW_ISO);
+  // Remove Implicit Demo Fallback (2026-10-08): a driver with no active pilot
+  // mapping used to receive the mock scenario's coordinates here, labelled
+  // simulated/fresh. They now get unavailable — there is no vehicle to locate.
+  test("non-pilot gets UNAVAILABLE location, never mock coordinates", async () => {
+    const { field, detail } = await assembleLocation("unmapped-driver-id", false, NOW_ISO);
 
-    assert.equal(field.origin, "simulated");
-    assert.equal(field.state, "fresh");
-    assert.equal(field.provider, "internal");
-    assert.equal(typeof field.value?.latitude, "number");
-    assert.equal(typeof field.value?.longitude, "number");
+    assert.equal(field.value, null);
+    assert.equal(field.origin, null);
+    assert.equal(field.state, "unavailable");
+    assert.equal(field.provider, null);
+    assert.equal(field.observedAt, null);
 
-    assert.equal(detail.provider, null);
+    assert.equal(detail.latitude, null);
+    assert.equal(detail.longitude, null);
+    assert.equal(detail.state, "unavailable");
     assert.equal(detail.source, "none");
-    assert.equal(detail.state, "fresh");
     assert.equal(detail.vehicleIdSource, "unavailable");
+    assert.equal(detail.formattedLocation, null, "must not surface a scenario location label");
+    assert.equal(detail.speedMilesPerHour, null, "must not surface a scenario speed");
   });
 });
 
@@ -407,33 +413,39 @@ describe("assembleWeather", () => {
     assert.equal(field.value, null, "toRiskInput.ts defaults a null weather value to 0 — unchanged this phase");
   });
 
-  test("demo: uses scenario coordinates, real weather succeeds -> observed/fresh provenance", async () => {
-    let calledWith: { latitude: number; longitude: number } | null = null;
-    const { field, detail } = await assembleWeather("mock-driver-id", false, NOW_ISO, unavailableLocation(), {
-      fetchWeather: async (params) => {
-        calledWith = { latitude: params.latitude, longitude: params.longitude };
+  // Remove Implicit Demo Fallback (2026-10-08): the non-pilot branch used to
+  // fetch REAL weather at the MOCK scenario's coordinates — weather for a
+  // place the driver has never been — and fall back to a simulated risk value
+  // when that fetch failed. Both are gone; non-pilots now have no fresh
+  // location, so the same fresh-GPS guard that protects pilots applies.
+  test("non-pilot NEVER requests weather — no location means no coordinates to ask about", async () => {
+    let called = false;
+    const { field, detail } = await assembleWeather("unmapped-driver-id", false, NOW_ISO, unavailableLocation(), {
+      fetchWeather: async () => {
+        called = true;
         return WEATHER_RESULT;
       },
     });
 
-    assert.ok(calledWith, "demo must still request weather using scenario coordinates");
-    assert.equal(field.origin, "observed");
-    assert.equal(field.state, "fresh");
-    assert.equal(field.provider, "openweather");
-    assert.equal(detail.locationState, null, "demo weather is not gated by pilot GPS state");
+    assert.equal(called, false, "must not call the weather provider with fabricated coordinates");
+    assert.equal(field.value, null);
+    assert.equal(field.origin, null);
+    assert.equal(field.state, "unavailable");
+    assert.equal(detail.status, "unavailable");
+    assert.equal(detail.weatherRisk, null);
+    assert.equal(detail.latitude, null, "must not surface scenario coordinates");
   });
 
-  test("demo: weather provider fails -> simulated scenario fallback, clearly labeled", async () => {
-    const { field, detail } = await assembleWeather("mock-driver-id", false, NOW_ISO, unavailableLocation(), {
+  test("non-pilot with a failing weather provider is still unavailable, never a simulated value", async () => {
+    const { field, detail } = await assembleWeather("unmapped-driver-id", false, NOW_ISO, unavailableLocation(), {
       fetchWeather: async () => null,
     });
 
-    assert.equal(field.origin, "simulated");
-    assert.equal(field.state, "fallback");
-    assert.equal(field.provider, null);
-    assert.equal(typeof field.value, "number", "demo fallback still has a usable weatherRisk value");
-    assert.equal(detail.status, "available");
-    assert.equal(detail.origin, "simulated");
+    assert.equal(field.value, null);
+    assert.equal(field.origin, null);
+    assert.equal(field.state, "unavailable");
+    assert.equal(detail.status, "unavailable");
+    assert.equal(detail.origin, null);
   });
 });
 
@@ -590,25 +602,28 @@ describe("assembleZoneRisk", () => {
     assert.notEqual(unavailableResult.field.origin, "simulated");
   });
 
-  test("demo: uses scenario zoneRisk/zoneName regardless of location, simulated/fresh provenance", async () => {
-    const scenario = getScenarioForDriver("mock-driver-id");
+  // Remove Implicit Demo Fallback (2026-10-08): the non-pilot branch used to
+  // claim availability "matched" against a fabricated zone name and risk
+  // value — the most misleading shape this field can take, since it looked
+  // like a genuine curated-zone hit. It now reports location_unavailable.
+  test("non-pilot gets location_unavailable zone risk, never a fabricated 'matched' zone", async () => {
     let called = false;
-    const { field, detail } = await assembleZoneRisk("mock-driver-id", false, NOW_ISO, unavailableLocation(), {
+    const { field, detail } = await assembleZoneRisk("unmapped-driver-id", false, NOW_ISO, unavailableLocation(), {
       matchZone: () => {
         called = true;
         return ZONE_MATCH;
       },
     });
 
-    assert.equal(called, false, "demo must never use the real zone dataset lookup");
-    assert.equal(field.origin, "simulated");
-    assert.equal(field.state, "fresh");
-    assert.equal(field.provider, "internal");
-    assert.equal(field.value, scenario.zoneRisk);
-    assert.equal(detail.zoneName, scenario.zoneName);
-    assert.equal(detail.status, "available");
-    assert.equal(detail.origin, "simulated");
-    assert.equal(detail.locationState, null, "demo zone risk is not gated by pilot GPS state");
+    assert.equal(called, false, "no usable GPS means the zone lookup must not run at all");
+    assert.equal(field.value, null);
+    assert.equal(field.origin, null);
+    assert.equal(field.state, "unavailable");
+    assert.equal(detail.zoneRisk, null);
+    assert.equal(detail.zoneName, null, "must not surface a scenario zone name");
+    assert.equal(detail.status, "unavailable");
+    assert.equal(detail.availability, "location_unavailable");
+    assert.notEqual(detail.availability, "matched", "must never claim a curated-zone match");
     assert.equal(detail.matchedZoneId, null);
   });
 });
@@ -695,14 +710,16 @@ describe("assembleSpeed", () => {
     assert.notEqual(unavailable.field.origin, "simulated");
   });
 
-  test("demo: uses scenario currentSpeed regardless of location, simulated/fresh provenance", () => {
-    const scenario = getScenarioForDriver("mock-driver-id");
-    const { field } = assembleSpeed("mock-driver-id", false, NOW_ISO, unavailableLocation());
+  // Remove Implicit Demo Fallback (2026-10-08): the non-pilot branch used to
+  // return the scenario's static currentSpeed. Non-pilots have no fresh
+  // location, so the same guard that protects pilots now applies.
+  test("non-pilot gets UNAVAILABLE speed, never a scenario constant", () => {
+    const { field } = assembleSpeed("unmapped-driver-id", false, NOW_ISO, unavailableLocation());
 
-    assert.equal(field.origin, "simulated");
-    assert.equal(field.state, "fresh");
-    assert.equal(field.provider, "internal");
-    assert.equal(field.value, scenario.currentSpeed);
+    assert.equal(field.value, null);
+    assert.equal(field.origin, null);
+    assert.equal(field.state, "unavailable");
+    assert.equal(field.provider, null);
   });
 
   // Speed plausibility (defense layer 1 of 2 — see MAX_PLAUSIBLE_SPEED_MPH /
@@ -838,5 +855,137 @@ describe("assembleDriverContext's single-`now` guarantee (N1 — one calculation
     assert.equal(locationDetail.fetchedAt, NOW_ISO);
     assert.equal(weatherDetail.fetchedAt, NOW_ISO);
     assert.equal(zoneDetail.fetchedAt, NOW_ISO);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Remove Implicit Demo Fallback (2026-10-08) — cross-field contract.
+//
+// The product requirement is per-DRIVER-CATEGORY, not per-field, so it is
+// asserted here as one table rather than scattered across each field's own
+// describe block. Four categories reach these functions:
+//
+//   never-mapped account      isPilot=false  -> everything unavailable
+//   deactivated/former pilot  isPilot=false  -> everything unavailable
+//   active pilot              isPilot=true   -> real provider data
+//   active pilot, no context  isPilot=true   -> unavailable, NOT a safe score
+//
+// The first two are indistinguishable to this module by design: isPilotDriver
+// already collapses "no mapping" and "mapping without isPilot+isActive" into
+// the same false. That is the point — assemble.ts must not need to know which
+// kind of non-pilot it is looking at, so neither can drift from the other,
+// and nothing downstream needs to tell them apart any more either (the
+// predicate that once did, lib/riskPersistence.ts, is gone along with the
+// synthetic writes it gated).
+describe("Remove Implicit Demo Fallback — non-pilot drivers get no simulated values", () => {
+  const NOW_ISO = "2026-10-08T12:00:00.000Z";
+
+  // Distinct ids on purpose: the old code hashed driverId to pick a scenario
+  // (lib/mockScenarios.ts::getScenarioForDriver), so two different ids could
+  // land on two different fabricated datasets. Asserting both are identically
+  // unavailable proves the hash is no longer consulted.
+  const NEVER_MAPPED = "never-mapped-account-id";
+  const DEACTIVATED  = "deactivated-former-pilot-id";
+
+  function unavailableLocation(): VehicleLocation {
+    return {
+      latitude: null, longitude: null, observedAt: null, fetchedAt: NOW_ISO,
+      provider: null, providerVehicleId: null, vehicleIdSource: "unavailable",
+      state: "unavailable", source: "none", vehicleName: null,
+      headingDegrees: null, speedMilesPerHour: null, isEcuSpeed: null,
+      formattedLocation: null,
+    };
+  }
+
+  for (const [label, driverId] of [["never-mapped account", NEVER_MAPPED], ["deactivated / former pilot", DEACTIVATED]] as const) {
+    describe(label, () => {
+      test("location: unavailable, no coordinates, no scenario label", async () => {
+        const { field, detail } = await assembleLocation(driverId, false, NOW_ISO);
+        assert.equal(field.value, null);
+        assert.equal(field.state, "unavailable");
+        assert.equal(field.origin, null);
+        assert.equal(detail.latitude, null);
+        assert.equal(detail.longitude, null);
+        assert.equal(detail.formattedLocation, null);
+        assert.equal(detail.speedMilesPerHour, null);
+      });
+
+      test("hos: unavailable, and never source 'mock'", async () => {
+        const { field, detail } = await assembleHos(driverId, false, NOW_ISO);
+        assert.equal(field.value, null);
+        assert.equal(field.state, "unavailable");
+        assert.equal(field.origin, null);
+        assert.equal(detail.shiftHoursUsed, null);
+        assert.equal(detail.status, "unavailable");
+        assert.equal(detail.source, "none", "the old non-pilot branch reported source 'mock' as 'available'");
+      });
+
+      test("weather: unavailable, and the provider is never called", async () => {
+        let called = false;
+        const { field, detail } = await assembleWeather(driverId, false, NOW_ISO, unavailableLocation(), {
+          fetchWeather: async () => { called = true; return null; },
+        });
+        assert.equal(called, false);
+        assert.equal(field.value, null);
+        assert.equal(field.state, "unavailable");
+        assert.equal(detail.status, "unavailable");
+      });
+
+      test("zoneRisk: location_unavailable, never a fabricated 'matched'", async () => {
+        let called = false;
+        const { field, detail } = await assembleZoneRisk(driverId, false, NOW_ISO, unavailableLocation(), {
+          matchZone: () => { called = true; return null; },
+        });
+        assert.equal(called, false);
+        assert.equal(field.value, null);
+        assert.equal(field.state, "unavailable");
+        assert.equal(detail.availability, "location_unavailable");
+        assert.equal(detail.zoneName, null);
+      });
+
+      test("speed: unavailable, never a scenario constant", () => {
+        const { field } = assembleSpeed(driverId, false, NOW_ISO, unavailableLocation());
+        assert.equal(field.value, null);
+        assert.equal(field.state, "unavailable");
+        assert.equal(field.origin, null);
+      });
+    });
+  }
+
+  test("two different non-pilot ids produce byte-identical unavailable fields", async () => {
+    // Directly targets the removed driverId-hash scenario selection: if any
+    // id-dependent fabrication survived anywhere, these would differ.
+    const a = await assembleLocation(NEVER_MAPPED, false, NOW_ISO);
+    const b = await assembleLocation(DEACTIVATED, false, NOW_ISO);
+    assert.deepEqual(a.field, b.field);
+    assert.deepEqual(a.detail, b.detail);
+
+    const ha = await assembleHos(NEVER_MAPPED, false, NOW_ISO);
+    const hb = await assembleHos(DEACTIVATED, false, NOW_ISO);
+    assert.deepEqual(ha.field, hb.field);
+    assert.deepEqual(ha.detail, hb.detail);
+  });
+
+  test("an active pilot with no usable context is unavailable too — not a safe-looking reading", async () => {
+    // The fourth category, and the reason this change is not just about demo
+    // accounts: a REAL pilot whose GPS could not be resolved must also report
+    // unavailable rather than a neutral value that scores well. Same gate,
+    // isPilot=true, so this is the pilot path proving it fails closed.
+    const loc = unavailableLocation();
+
+    const weather = await assembleWeather("active-pilot-id", true, NOW_ISO, loc, {
+      fetchWeather: async () => { throw new Error("must not be called without fresh GPS"); },
+    });
+    assert.equal(weather.field.state, "unavailable");
+    assert.equal(weather.detail.status, "unavailable");
+
+    const zone = await assembleZoneRisk("active-pilot-id", true, NOW_ISO, loc, {
+      matchZone: () => { throw new Error("must not be called without fresh GPS"); },
+    });
+    assert.equal(zone.field.state, "unavailable");
+    assert.equal(zone.detail.availability, "location_unavailable");
+
+    const speed = assembleSpeed("active-pilot-id", true, NOW_ISO, loc);
+    assert.equal(speed.field.state, "unavailable");
   });
 });

@@ -54,9 +54,20 @@ export interface RiskApiLiveData {
 }
 
 export interface RiskApiTodaySummary {
+  /**
+   * A real count of today's passing Inspection rows. Available for EVERY
+   * driver, pilot or not — it is database-backed and owes nothing to any
+   * provider, so Remove Implicit Demo Fallback deliberately left it alone.
+   */
   checksPassed: number;
   milesDriven: number | null;
-  alertsActive: number;
+  /**
+   * Null when no risk score could be calculated, since alerts are risk
+   * factors and there are none to count — distinct from 0, which means "we
+   * looked and there are no active alerts." Read dataStatus.alerts rather
+   * than treating a missing value as zero.
+   */
+  alertsActive: number | null;
   timezone: string;
   dataStatus: {
     checks: "available" | "unavailable";
@@ -101,8 +112,24 @@ export interface RiskApiResponse {
   weather: WeatherDetail;
   zone: ZoneDetail;
   todaySummary: RiskApiTodaySummary;
+  /**
+   * What was fed to the engine. When `result` is null NOTHING was fed to it,
+   * and this object's numeric members are toRiskInput's neutral `?? 0`
+   * placeholders for absent fields — they are NOT measurements and must not
+   * be rendered as such. `contextSources` in the same response is the
+   * authoritative per-field provenance.
+   */
   input: RiskInput;
-  result: RiskOutput;
+  /**
+   * Null when the context was too thin to score — see
+   * lib/riskScoreability.ts::isRiskScoreable. Reached by a driver with no
+   * active pilot mapping (never-mapped, deactivated, or a test/demo account)
+   * AND by an active pilot whose provider data could not be resolved on this
+   * call. Clients must render an explicit unavailable state; substituting a
+   * default, a cached score, or a zero re-creates the exact failure this
+   * nullability exists to prevent (Remove Implicit Demo Fallback, 2026-10-08).
+   */
+  result: RiskOutput | null;
 }
 
 export type { ApiErrorResponse };

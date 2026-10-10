@@ -277,7 +277,11 @@ export function AuditScreen({
           <div style={{ fontSize: 20, fontWeight: 600, color: "var(--text-primary)", letterSpacing: "-0.4px" }}>
             {t("auditTrail")}
           </div>
-          {location && (
+          {/* locationLabel is null for any driver without an active pilot
+              mapping (Remove Implicit Demo Fallback, 2026-10-08) — it used to
+              be a mock scenario label. Guard on the label itself, not just on
+              `location`, or this renders an empty line. */}
+          {location?.locationLabel && (
             <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 3 }}>
               {location.locationLabel}
             </div>

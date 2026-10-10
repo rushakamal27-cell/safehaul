@@ -3,6 +3,28 @@
  *
  * Samsara data provider for SafeHaul.
  *
+ * ===========================================================================
+ * NOT REACHABLE FROM ANY NORMAL REQUEST PATH (Remove Implicit Demo Fallback,
+ * 2026-10-08).
+ *
+ * Every getMock* getter below, and the two composites getDriverDailySummary /
+ * getDriverVehicleContext, are retained for TESTS and for a possible future
+ * EXPLICIT, opt-in Demo Mode. No production module imports them any more:
+ * lib/driverContext/assemble.ts, lib/todaySummary.ts and lib/location.ts all
+ * dropped their imports, and app/api/risk's synthetic persistence block was
+ * deleted outright. A driver with no active pilot mapping now receives
+ * unavailable fields and result: null, never a fabricated value.
+ *
+ * getWeatherRiskField is the ONE export here still used in production. It is
+ * a real OpenWeatherMap client that happens to live in this file and has no
+ * concept of mock mode; it takes explicit coordinates and is called only with
+ * a pilot's fresh real GPS.
+ *
+ * If you wire any getMock* function back into a request path, you are
+ * re-introducing the exact defect this change removed. Demo Mode must be an
+ * explicit opt-in signal, never a fallback triggered by absent data.
+ * ===========================================================================
+ *
  * Provider mode is controlled by SAMSARA_API_KEY in your environment:
  *   - Absent (default): scenario-based mock data from lib/mockScenarios.ts
  *   - Present: replace each mock function body with the real Samsara API call
@@ -13,20 +35,21 @@
  *                                         lib/driverContext/assemble.ts + toRiskInput.ts for
  *                                         the current path; retained as a standalone
  *                                         convenience wrapper)
- *   getDriverDailySummary(driverId)    → DriverDailySummary (consumed by lib/location.ts)
- *   getDriverVehicleContext(driverId)  → DriverVehicleContext (consumed by lib/location.ts)
+ *   getDriverDailySummary(driverId)    → DriverDailySummary (was lib/location.ts)
+ *   getDriverVehicleContext(driverId)  → DriverVehicleContext (was lib/location.ts)
  *
  * Per-field getters (getMockDriverHos, getMockVehicleStats, getMockSafetyEvents,
- * getMockZoneRisk) are also exported for lib/driverContext/assemble.ts, which
- * needs each field individually to attach provenance metadata.
+ * getMockZoneRisk) were exported for lib/driverContext/assemble.ts, which
+ * needed each field individually to attach provenance metadata. It no longer
+ * imports them.
  *
  * getWeatherRiskField (Phase 2 — Weather from Real Vehicle GPS) takes explicit
  * coordinates, not a MockScenario — it has no concept of mock/pilot at all.
- * lib/driverContext/assemble.ts decides which coordinates to pass (real GPS
- * for a pilot with fresh location, scenario coordinates for demo) and what a
- * null result means in each case.
+ * lib/driverContext/assemble.ts decides which coordinates to pass — now only
+ * ever a pilot's fresh real GPS — and what a null result means.
  *
- * getMockTripStats is exported for lib/todaySummary.ts's non-pilot/demo mileage path.
+ * getMockTripStats was exported for lib/todaySummary.ts's non-pilot mileage
+ * path; that path now returns null/"unavailable" and imports nothing here.
  */
 
 import { RiskInput } from "@/lib/riskEngine";

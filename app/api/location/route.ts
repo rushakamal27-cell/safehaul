@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getMockDriverLocation, getPilotDriverLocation } from "@/lib/location";
+import { getUnavailableDriverLocation, getPilotDriverLocation } from "@/lib/location";
 import { isPilotDriver } from "@/lib/driverEvents";
 import type { ApiErrorResponse } from "@/lib/api/common";
 import type { LocationApiResponse } from "@/lib/api/location";
@@ -18,10 +18,14 @@ export async function GET(request: NextRequest): Promise<NextResponse<LocationAp
   }
 
   try {
+    // Remove Implicit Demo Fallback (2026-10-08): the non-pilot branch
+    // returned fabricated coordinates/zone/speed/weather. It now returns an
+    // explicit unavailable state, keeping only the driver's real inspection
+    // count — see lib/location.ts::getUnavailableDriverLocation.
     const pilotDriver = await isPilotDriver(driverId);
     const location = pilotDriver
       ? await getPilotDriverLocation(driverId)
-      : await getMockDriverLocation(driverId);
+      : await getUnavailableDriverLocation(driverId);
 
     return NextResponse.json(location);
   } catch (error) {

@@ -8,41 +8,56 @@
  * Provider fetchers themselves are unchanged; this module only decides,
  * per field, which source answered and how to label it.
  *
- * Field rules:
- *   - safetyEvents: real DriverEvent rows for pilot drivers, simulated
- *     scenario events otherwise. State reflects the on-demand sync outcome
- *     ("refreshed" → fresh, anything else → cached — stored events stay
- *     real even when a refresh attempt didn't run or failed this call).
+ * Remove Implicit Demo Fallback (2026-10-08): a driver with NO active pilot
+ * mapping no longer receives simulated values for any field. Every field
+ * below reports `unavailable` for them, because "we have no provider data
+ * for this driver" is the truth and a fabricated score is not. This closes
+ * the last implicit path by which a normal application user could see
+ * numbers that looked real and were not — scores, mileage, events, zones.
+ * The mock generators (lib/mockScenarios.ts, lib/samsara.ts's getMock*)
+ * still exist for tests and a possible future EXPLICIT, opt-in Demo Mode,
+ * but this module no longer imports them and no normal request can reach
+ * them. "Unknown" is reported as unknown; see ../riskEngine and
+ * ./toRiskInput for why that must not collapse into a safe-looking score.
+ *
+ * Field rules (isPilot here means "has an active, pilot-flagged provider
+ * mapping" — see lib/driverEvents.ts::isPilotDriver):
+ *   - safetyEvents: real DriverEvent rows for pilot drivers; `unavailable`
+ *     otherwise. State reflects the on-demand sync outcome ("refreshed" →
+ *     fresh, anything else → cached — stored events stay real even when a
+ *     refresh attempt didn't run or failed this call).
  *   - hos: real Samsara HOS clocks for pilot drivers with a resolvable
- *     mapping (see assembleHos below) — unlike speed, a failed or
- *     unresolvable pilot fetch yields value: null, state: "unavailable",
- *     NOT a mock fallback number, per explicit product requirement ("do not
- *     silently substitute a fake value"). Demo drivers still get a
- *     simulated value.
+ *     mapping (see assembleHos below) — a failed or unresolvable pilot
+ *     fetch yields value: null, state: "unavailable", NOT a mock fallback
+ *     number, per explicit product requirement ("do not silently substitute
+ *     a fake value"). Non-pilots take the same unavailable() path.
+ *   - location (Phase 1 — Real GPS): real Samsara GPS for pilot drivers via
+ *     the current vehicle stats snapshot (see assembleLocation below) — a
+ *     failed/unresolvable/too-old pilot fetch yields value: null, state:
+ *     "unavailable", never a mock coordinate. Non-pilots are unavailable
+ *     immediately: there is no vehicle to locate. Does not back a RiskInput
+ *     field or affect contextStatus — see assembleLocation's own comments.
  *   - speed (Phase 4 — Real Speed data pipeline; Phase 4.5 — Contextual
- *     Speed): for pilots, sourced from the same Samsara GPS snapshot
- *     assembleLocation already fetches (gps.speedMilesPerHour) — no separate
- *     provider call. Gated strictly on location.state === "fresh", same
- *     reasoning as weather/zoneRisk (see assembleSpeed below); stale/
- *     unavailable location, a null speedMilesPerHour reading, or an
- *     implausible one (negative, non-finite, or above lib/riskEngine.ts's
+ *     Speed): sourced from the same Samsara GPS snapshot assembleLocation
+ *     already fetches (gps.speedMilesPerHour) — no separate provider call.
+ *     Gated strictly on location.state === "fresh", same reasoning as
+ *     weather/zoneRisk (see assembleSpeed below); stale/unavailable
+ *     location, a null speedMilesPerHour reading, or an implausible one
+ *     (negative, non-finite, or above lib/riskEngine.ts's
  *     MAX_PLAUSIBLE_SPEED_MPH — corrupted telemetry, not a real fast truck)
  *     all yield state "unavailable", never a mock fallback and never a
- *     bogus "observed" value. Demo drivers are unchanged: scenario
- *     currentSpeed, simulated/fresh. Feeds lib/riskEngine.ts's continuous
+ *     bogus "observed" value. Feeds lib/riskEngine.ts's continuous
  *     speed-exposure Contextual Speed model — see calculateSpeedExposure.
- *   - weather (Phase 2 — Weather from Real Vehicle GPS): for pilots, gated
- *     strictly on location.state === "fresh" — only a fresh real GPS
- *     reading may back a weather request; stale/unavailable location
- *     yields weather value: null, state: "unavailable", NEVER the old
- *     wrong-location mock fallback (see assembleWeather below). Demo
- *     drivers are unchanged: real when OPENWEATHER_API_KEY is set and the
- *     call succeeds for the scenario's coordinates, simulated fallback
- *     otherwise.
+ *   - weather (Phase 2 — Weather from Real Vehicle GPS): gated strictly on
+ *     location.state === "fresh" — only a fresh real GPS reading may back a
+ *     weather request; stale/unavailable location yields weather value:
+ *     null, state: "unavailable", NEVER the old wrong-location mock
+ *     fallback (see assembleWeather below). Because location is now
+ *     unavailable for non-pilots, this one rule covers every driver.
  *   - zoneRisk (Phase 3 — Real Zone Risk; zone-semantics clarification,
- *     2026-08-04): for pilots, a lookup only runs when location.state ===
- *     "fresh", same rule and reasoning as weather — see assembleZoneRisk
- *     below. Unlike weather, a fresh position outside every zone in
+ *     2026-08-04): a lookup only runs when location.state === "fresh", same
+ *     rule and reasoning as weather — see assembleZoneRisk below. Unlike
+ *     weather, a fresh position outside every zone in
  *     lib/providers/zones/zoneData.ts is NOT "unavailable" — it's a real,
  *     available reading of 0 ("confirmed not in a known risk zone" against
  *     SafeHaul's v1 curated dataset, not nationwide coverage), origin
@@ -51,26 +66,15 @@
  *     "unavailable". See ZoneAvailability in ./types.ts for the full
  *     four-way distinction (matched / outside_monitored_zones /
  *     location_unavailable / location_stale) and why this never fabricates
- *     a penalty. Demo drivers are unchanged: scenario zoneRisk/zoneName,
- *     simulated/fresh.
- *   - location (Phase 1 — Real GPS): real Samsara GPS for pilot drivers via
- *     the current vehicle stats snapshot (see assembleLocation below) —
- *     like hos, a failed/unresolvable/too-old pilot fetch yields value:
- *     null, state: "unavailable", never a mock coordinate. Demo drivers
- *     keep the existing mock scenario coordinates. Does not yet back a
- *     RiskInput field or affect contextStatus — see assembleLocation's and
- *     DriverContext.location's own comments.
+ *     a penalty — a non-pilot reports location_unavailable, never a
+ *     fabricated "matched".
  */
 
-import { getScenarioForDriver } from "@/lib/mockScenarios";
 import { isPlausibleSpeed } from "@/lib/riskEngine";
-import {
-  getMockDriverHos,
-  getMockVehicleStats,
-  getMockSafetyEvents,
-  getWeatherRiskField,
-  type RealWeatherResult,
-} from "@/lib/samsara";
+// getWeatherRiskField is a REAL OpenWeatherMap client that happens to live in
+// lib/samsara.ts. The getMock* getters and lib/mockScenarios.ts are
+// deliberately NOT imported here any more — see this file's header.
+import { getWeatherRiskField, type RealWeatherResult } from "@/lib/samsara";
 import { matchZone, type ZoneMatch } from "@/lib/providers/zones/zoneRisk";
 import {
   getRecentDriverEvents,
@@ -180,15 +184,12 @@ async function assembleSafetyEvents(
   now: string
 ): Promise<{ field: DriverContext["safetyEvents"]; liveData: DriverContextLiveData | null }> {
   if (!isPilot) {
-    const scenario = getScenarioForDriver(driverId);
+    // Remove Implicit Demo Fallback (2026-10-08): a driver with no active
+    // pilot mapping has no provider to read safety events from, so the
+    // honest answer is "unavailable" — never a fabricated event list. See
+    // this file's header for the full rationale.
     return {
-      field: {
-        value: getMockSafetyEvents(scenario).map(({ type, severity }) => ({ type, severity })),
-        origin: "simulated",
-        state: "fresh",
-        provider: "internal",
-        observedAt: now,
-      },
+      field: { value: null, origin: null, state: "unavailable", provider: null, observedAt: null },
       liveData: null,
     };
   }
@@ -260,21 +261,6 @@ export async function assembleHos(
   isPilot: boolean,
   now: string
 ): Promise<{ field: DriverContext["hos"]; detail: HosDetail }> {
-  if (!isPilot) {
-    const hoursUsed = getMockDriverHos(getScenarioForDriver(driverId)).hosHoursUsed;
-    return {
-      field: simulatedField(hoursUsed, false, now),
-      detail: {
-        drivingHoursUsed: null,
-        drivingHoursRemaining: null,
-        shiftHoursUsed: hoursUsed,
-        status: "available",
-        source: "mock",
-        updatedAt: now,
-      },
-    };
-  }
-
   const unavailable = (): { field: DriverContext["hos"]; detail: HosDetail } => ({
     field: { value: null, origin: null, state: "unavailable", provider: null, observedAt: null },
     detail: {
@@ -286,6 +272,12 @@ export async function assembleHos(
       updatedAt: null,
     },
   });
+
+  // Remove Implicit Demo Fallback (2026-10-08): no active pilot mapping means
+  // no provider HOS source, so report unavailable rather than a fabricated
+  // hours-used figure. Reuses the same unavailable() shape the pilot failure
+  // paths below already return, so the two are indistinguishable downstream.
+  if (!isPilot) return unavailable();
 
   const mapping = await prisma.driverProviderMapping.findFirst({
     where: { driverId, isPilot: true, isActive: true },
@@ -364,10 +356,9 @@ export interface AssembleLocationDeps {
  * unavailable design: a failed/unresolvable/stale-beyond-threshold fetch
  * never falls back to mock coordinates for a pilot — only `unavailable()`.
  * `stale` still carries the real coordinates (for transparency), classified
- * via classifyLocationFreshness. Non-pilots keep the existing mock scenario
- * coordinates (getMockVehicleStats), same as speed/zoneRisk, with simulated
- * provenance surfaced through ContextSources — never getMockDriverLocation,
- * which duplicates the same mock source under a different name.
+ * via classifyLocationFreshness. Non-pilots are unavailable immediately —
+ * there is no vehicle to locate (Remove Implicit Demo Fallback, 2026-10-08);
+ * they previously received the mock scenario coordinates here.
  *
  * Location does not yet feed RiskInput (see toRiskInput.ts) and is
  * deliberately excluded from deriveContextStatus's field list — see
@@ -381,30 +372,6 @@ export async function assembleLocation(
   deps: AssembleLocationDeps = {}
 ): Promise<{ field: DriverContext["location"]; detail: VehicleLocation }> {
   const fetchedAt = now;
-
-  if (!isPilot) {
-    const scenario = getScenarioForDriver(driverId);
-    const vehicle = getMockVehicleStats(scenario);
-    return {
-      field: simulatedField({ latitude: vehicle.lat, longitude: vehicle.lng }, false, now),
-      detail: {
-        latitude: vehicle.lat,
-        longitude: vehicle.lng,
-        observedAt: now,
-        fetchedAt,
-        provider: null,
-        providerVehicleId: null,
-        vehicleIdSource: "unavailable",
-        state: "fresh",
-        source: "none",
-        vehicleName: null,
-        headingDegrees: null,
-        speedMilesPerHour: vehicle.currentSpeed,
-        isEcuSpeed: null,
-        formattedLocation: scenario.locationLabel,
-      },
-    };
-  }
 
   const unavailable = (
     vehicleIdSource: VehicleLocation["vehicleIdSource"],
@@ -428,6 +395,13 @@ export async function assembleLocation(
       formattedLocation: null,
     },
   });
+
+  // Remove Implicit Demo Fallback (2026-10-08): no active pilot mapping means
+  // there is no vehicle to locate, so report unavailable rather than mock
+  // coordinates. Note this also makes weather/zoneRisk/speed unavailable,
+  // since all three are gated on location.state === "fresh" below — which is
+  // correct: without a real position there is nothing to evaluate.
+  if (!isPilot) return unavailable("unavailable");
 
   const resolveVehicleId = deps.resolveVehicleId ?? resolveCurrentVehicleId;
   const fetchGpsSnapshot = deps.fetchGpsSnapshot ?? fetchVehicleGpsSnapshot;
@@ -501,9 +475,11 @@ export interface AssembleWeatherDeps {
  * unavailable, never simulated, for a pilot — see the "trust rule never
  * applies simulated to a pilot" pattern also used by assembleHos/assembleLocation.
  *
- * Demo: unchanged from before this phase — scenario coordinates, real
- * OpenWeatherMap value when available, simulated scenario.weatherRisk
- * fallback otherwise.
+ * Non-pilots (Remove Implicit Demo Fallback, 2026-10-08): no longer a
+ * special case at all. They previously got REAL OpenWeatherMap data for the
+ * MOCK scenario coordinates, with a simulated scenario.weatherRisk fallback —
+ * weather for a place the driver had never been. Their location is now
+ * unavailable, so the fresh-GPS gate below returns unavailable for them too.
  */
 export async function assembleWeather(
   driverId: string,
@@ -550,48 +526,15 @@ export async function assembleWeather(
     }
   };
 
-  if (!isPilot) {
-    const scenario = getScenarioForDriver(driverId);
-    const result = await fetchWithTimeout(scenario.lat, scenario.lng);
-
-    if (result) {
-      return {
-        field: { value: result.weatherRisk, origin: "observed", state: "fresh", provider: "openweather", observedAt: result.observedAt },
-        detail: {
-          weatherRisk: result.weatherRisk,
-          status: "available",
-          origin: "observed",
-          provider: "openweather",
-          observedAt: result.observedAt,
-          fetchedAt,
-          latitude: scenario.lat,
-          longitude: scenario.lng,
-          locationState: null,
-          locationObservedAt: null,
-          conditionSummary: result.conditionSummary,
-        },
-      };
-    }
-
-    return {
-      field: { value: scenario.weatherRisk, origin: "simulated", state: "fallback", provider: null, observedAt: null },
-      detail: {
-        weatherRisk: scenario.weatherRisk,
-        status: "available",
-        origin: "simulated",
-        provider: null,
-        observedAt: null,
-        fetchedAt,
-        latitude: scenario.lat,
-        longitude: scenario.lng,
-        locationState: null,
-        locationObservedAt: null,
-        conditionSummary: null,
-      },
-    };
-  }
-
-  // Pilot: only a fresh real GPS location may drive a weather request.
+  // Remove Implicit Demo Fallback (2026-10-08): the former non-pilot branch
+  // here fetched REAL weather at the MOCK scenario's coordinates (and fell
+  // back to a simulated risk value when that fetch failed) — weather for a
+  // place the driver has never been. It is deleted rather than replaced: with
+  // location now unavailable for non-pilots, the existing fresh-GPS guard
+  // below already returns unavailable for them, so one rule now serves every
+  // driver. Real-provider behavior for pilots is byte-for-byte unchanged.
+  //
+  // Only a fresh real GPS location may drive a weather request.
   if (locationDetail.state !== "fresh" || locationDetail.latitude === null || locationDetail.longitude === null) {
     return unavailable(null, null, locationDetail.state, locationDetail.observedAt);
   }
@@ -649,8 +592,10 @@ function zoneStatusFor(availability: ZoneAvailability): "available" | "unavailab
  * state "unavailable" and never a fabricated non-zero penalty. See
  * ZoneAvailability in ./types.ts for the full distinction.
  *
- * Demo: unchanged from before this phase — scenario zoneRisk/zoneName,
- * origin "simulated", state "fresh".
+ * Non-pilots (Remove Implicit Demo Fallback, 2026-10-08): previously got
+ * scenario zoneRisk/zoneName reported as availability "matched", which looked
+ * exactly like a genuine curated-zone hit. They now report
+ * location_unavailable via the gate below.
  */
 export async function assembleZoneRisk(
   driverId: string,
@@ -691,33 +636,14 @@ export async function assembleZoneRisk(
     },
   });
 
-  if (!isPilot) {
-    const scenario = getScenarioForDriver(driverId);
-    return {
-      field: { value: scenario.zoneRisk, origin: "simulated", state: "fresh", provider: "internal", observedAt: now },
-      detail: {
-        zoneRisk: scenario.zoneRisk,
-        zoneName: scenario.zoneName,
-        zoneType: null,
-        zoneExplanation: null,
-        availability: "matched",
-        explanation: ZONE_AVAILABILITY_EXPLANATIONS.matched,
-        status: "available",
-        origin: "simulated",
-        provider: null,
-        observedAt: now,
-        fetchedAt,
-        latitude: scenario.lat,
-        longitude: scenario.lng,
-        locationState: null,
-        locationObservedAt: null,
-        matchedZoneId: null,
-        distanceMiles: null,
-      },
-    };
-  }
-
-  // Pilot: only a fresh real GPS location may drive a zone lookup.
+  // Remove Implicit Demo Fallback (2026-10-08): the former non-pilot branch
+  // claimed availability "matched" against a fabricated zone name and risk
+  // value, which is the most misleading shape this field can take — it looked
+  // like a real curated-zone hit. Deleted rather than replaced: location is
+  // now unavailable for non-pilots, so the fresh-GPS guard below returns
+  // location_unavailable for them, which is the truthful availability value.
+  //
+  // Only a fresh real GPS location may drive a zone lookup.
   if (locationDetail.state !== "fresh" || locationDetail.latitude === null || locationDetail.longitude === null) {
     const availability = locationDetail.state === "stale" ? "location_stale" : "location_unavailable";
     return locationGap(availability, locationDetail.state, locationDetail.observedAt);
@@ -800,9 +726,9 @@ export async function assembleZoneRisk(
  * reading backed by a bogus number — a driver or reviewer inspecting
  * provenance should never see "Live" next to an impossible speed.
  *
- * Demo: unchanged — scenario currentSpeed, simulated/fresh. Scenario speeds
- * are trusted static constants (lib/mockScenarios.ts), not telemetry, so
- * they're not run through isPlausibleSpeed.
+ * Non-pilots (Remove Implicit Demo Fallback, 2026-10-08): previously got the
+ * scenario currentSpeed constant. Their location is now unavailable, so the
+ * gate below covers them with no separate branch.
  *
  * No dedicated SpeedDetail transparency block is introduced this phase:
  * VehicleLocation (returned as `location` in the API response) already
@@ -820,11 +746,10 @@ export function assembleSpeed(
   now: string,
   locationDetail: VehicleLocation
 ): { field: DriverContext["speed"] } {
-  if (!isPilot) {
-    const scenario = getScenarioForDriver(driverId);
-    return { field: simulatedField(getMockVehicleStats(scenario).currentSpeed, false, now) };
-  }
-
+  // Remove Implicit Demo Fallback (2026-10-08): the former non-pilot branch
+  // returned the scenario's static currentSpeed. Deleted rather than
+  // replaced — location is now unavailable for non-pilots, so the fresh-GPS
+  // guard below already returns unavailable for them.
   if (
     locationDetail.state !== "fresh" ||
     locationDetail.speedMilesPerHour === null ||

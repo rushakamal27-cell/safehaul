@@ -23,7 +23,7 @@ export type CardinalHeading = "N" | "NE" | "E" | "SE" | "S" | "SW" | "W" | "NW";
 
 /**
  * The full success shape returned by GET /api/location — see
- * lib/location.ts's getMockDriverLocation/getPilotDriverLocation for the
+ * lib/location.ts's getUnavailableDriverLocation/getPilotDriverLocation for the
  * construction sites this mirrors field-for-field. Field-level doc
  * comments live there, not here, to avoid two copies of the same
  * explanation drifting apart.
@@ -41,6 +41,13 @@ export interface LocationApiResponse {
   checksPassed: number;
   milesDriven: number | null;
   updatedAt: string;
-  origin: "observed" | "simulated";
+  /**
+   * Null when no position could be established at all (state
+   * "unavailable") — there is no source to attribute. "simulated" is no
+   * longer produced by any normal request path (Remove Implicit Demo
+   * Fallback, 2026-10-08); it is retained in the union for stored/legacy
+   * payloads and a possible future explicit opt-in Demo Mode.
+   */
+  origin: "observed" | "simulated" | null;
   state: LocationState;
 }
