@@ -6,6 +6,7 @@ import {
   translateAuditDetail,
   translateAuditMeta,
 } from "../auditLabels";
+import { LEGACY_PROVENANCE_META } from "../../auditItems";
 
 describe("translateAuditBadge", () => {
   test("'en' returns the badge unchanged", () => {
@@ -100,5 +101,30 @@ describe("translateAuditMeta", () => {
 
   test("an unrecognized chip passes through unchanged rather than breaking the array", () => {
     assert.deepEqual(translateAuditMeta(["📍 Some Address, TX"], "ru"), ["📍 Some Address, TX"]);
+  });
+});
+
+// Legacy provenance label (2026-10-09). This dictionary matches meta chips by
+// EXACT string, so the key here and lib/auditItems.ts's constant must stay
+// byte-identical — em dash included. If they drift, the lookup silently falls
+// through and Russian readers see the English text with no error anywhere.
+// Importing the real constant rather than retyping it is what makes that
+// impossible to get wrong.
+describe("translateAuditMeta — legacy provenance label", () => {
+  test("the exact-match key is wired to the real constant, not a copy of it", () => {
+    const [translated] = translateAuditMeta([LEGACY_PROVENANCE_META], "ru");
+    assert.notEqual(translated, LEGACY_PROVENANCE_META, "fell through untranslated — the key has drifted");
+    assert.equal(translated, "📄 Устаревшая запись — происхождение не подтверждено");
+  });
+
+  test("'en' passes it through unchanged", () => {
+    assert.deepEqual(translateAuditMeta([LEGACY_PROVENANCE_META], "en"), [LEGACY_PROVENANCE_META]);
+  });
+
+  test("it survives alongside the other chips on a real legacy card", () => {
+    assert.deepEqual(
+      translateAuditMeta(["📊 68/100", LEGACY_PROVENANCE_META], "ru"),
+      ["📊 68/100", "📄 Устаревшая запись — происхождение не подтверждено"]
+    );
   });
 });

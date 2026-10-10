@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getMockAuditEvents, AuditEvent } from "@/lib/audit";
 import { prisma } from "@/lib/prisma";
-import { isPilotDriver } from "@/lib/driverEvents";
 import { formatAuditDate } from "@/lib/auditFormatting";
 import {
   buildComplianceScoreAuditItem,
@@ -28,10 +27,9 @@ export async function GET(request: NextRequest) {
 
   // Fetch all real event tables in parallel
   const [
-    pilotDriver, providerMapping, incidents, safetyEvents, complianceScores, trips, inspections, driverEventsRaw,
+    providerMapping, incidents, safetyEvents, complianceScores, trips, inspections, driverEventsRaw,
     dailySafetyScores, dailyDrivingSummaries,
   ] = await Promise.all([
-    isPilotDriver(driverId),
     // When this driver was first mapped to ANY provider, regardless of the
     // mapping's current isPilot/isActive flags. Sole input to the legacy
     // synthetic-row classification below — see
@@ -148,19 +146,16 @@ export async function GET(request: NextRequest) {
     .filter((cs) => !isSynthetic(cs.createdAt))
     .map(buildComplianceScoreAuditItem);
 
-  // trip.weatherData is written fresh on every /api/risk call for the
-  // driver's CURRENT pilot status (app/api/risk/route.ts's
-  // weatherDataSnapshot) — real per-field values for a pilot, fully mock
-  // scenario values for a non-pilot. There's no per-row stored flag for what
-  // it was at write time, so `pilotDriver` (current status) is used as an
-  // approximation, same simplification pattern as todaySummary's UTC-day
-  // "today" — a driver whose pilot status changed since a given trip could
-  // see it mislabeled, but that's a narrow historical edge case, not the
-  // common "is this Trip's data real" question this tag answers.
+  // buildTripAuditItem no longer takes pilotDriver (2026-10-09). It used the
+  // driver's CURRENT pilot status to decide whether to tag a row "🧪 Demo
+  // Data", which was the wrong question: the row's trustworthiness depends on
+  // what the driver's status was WHEN IT WAS WRITTEN, which nothing records.
+  // Every row still reaching this builder is an `ambiguous` legacy row, so it
+  // now carries LEGACY_PROVENANCE_META unconditionally instead.
   const tripItems: Stamped[] = trips
     .filter((trip) => !finalizedSummaryDays.has(utcDayKey(trip.startedAt)))
     .filter((trip) => !isSynthetic(trip.createdAt))
-    .map((trip) => buildTripAuditItem(trip, pilotDriver));
+    .map((trip) => buildTripAuditItem(trip));
 
   const dailySafetyScoreItems: Stamped[] = dailySafetyScores.map(buildDailySafetyScoreAuditItem);
   const dailyDrivingSummaryItems: Stamped[] = dailyDrivingSummaries.map(buildDailyDrivingSummaryAuditItem);
