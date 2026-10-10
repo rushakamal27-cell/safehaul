@@ -277,6 +277,38 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
           </div>
         )}
 
+        {/* Remove Implicit Demo Fallback (2026-10-08): no score to show.
+            Reached when riskData.result is null — a driver with no active
+            pilot mapping, or an active pilot whose vehicle data could not be
+            resolved this call. Previously this state did not exist: the
+            dashboard always had a score, because one was always fabricated
+            when real data was missing. The panel is deliberately plain and
+            unreassuring; "we don't know" must not look like "you're fine". */}
+        {!loading && !error && riskData && !result && (
+          <div
+            style={{
+              background: "var(--card)",
+              border: "1px solid var(--border)",
+              borderRadius: 12,
+              padding: "20px 16px",
+              textAlign: "center",
+            }}
+          >
+            <div style={{ fontSize: 44, fontWeight: 700, color: "var(--text-tertiary)", letterSpacing: "-2px", lineHeight: 1, fontVariantNumeric: "tabular-nums" }}>
+              —
+            </div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text-secondary)", marginTop: 10 }}>
+              {t("scoreUnavailable")}
+            </div>
+            <div style={{ fontSize: 12, color: "var(--text-tertiary)", marginTop: 6, lineHeight: 1.5 }}>
+              {/* dataSource "mock" now means only "no active pilot mapping"
+                  (see app/api/risk/route.ts) — it no longer implies the
+                  response contains mock data, which it cannot. */}
+              {riskData.dataSource === "mock" ? t("scoreUnavailableNoProvider") : t("scoreUnavailableNoContext")}
+            </div>
+          </div>
+        )}
+
         {result && levelConfig && (
           <>
             {/* Score + badge row */}
@@ -604,7 +636,10 @@ export function DashboardScreen({ onIncident }: { onIncident: () => void }) {
             {
               value: loading ? "—" : (riskData && riskData.todaySummary.dataStatus.alerts === "available"
                 ? String(riskData.todaySummary.alertsActive) : "—"),
-              color: riskData && riskData.todaySummary.alertsActive > 0 ? "var(--warning)" : "var(--text-secondary)",
+              // Null (no score -> no factors to count) must read as neutral,
+              // not as a warning and not as a reassuring zero.
+              color: riskData && riskData.todaySummary.alertsActive !== null && riskData.todaySummary.alertsActive > 0
+                ? "var(--warning)" : "var(--text-secondary)",
               label: t("alertsActive"),
             },
           ].map((s) => (

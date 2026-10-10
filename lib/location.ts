@@ -5,8 +5,11 @@
  *
  * Two paths, matching the trust rules already established for DriverContext
  * (lib/driverContext/assemble.ts):
- *   - getMockDriverLocation: non-pilot/demo drivers — unchanged, fully
- *     scenario-driven via lib/samsara.ts.
+ *   - getUnavailableDriverLocation: drivers with no active pilot mapping —
+ *     every provider-derived field null, state "unavailable". Was
+ *     getMockDriverLocation, fully scenario-driven via lib/samsara.ts, until
+ *     Remove Implicit Demo Fallback (2026-10-08); the driver's real
+ *     Inspection count is the one field it still returns.
  *   - getPilotDriverLocation (Phase 2, extended Phase 5): pilot drivers —
  *     reuses lib/driverContext/assemble.ts's assembleLocation/assembleWeather/
  *     assembleZoneRisk/assembleSpeed directly rather than duplicating
@@ -34,7 +37,6 @@
  * as-is — reusing an existing real source, not new assembly.
  */
 
-import { getDriverVehicleContext, getDriverDailySummary } from "@/lib/samsara";
 import { fetchTodaySummaryData } from "@/lib/todaySummary";
 import { assembleLocation, assembleWeather, assembleZoneRisk, assembleSpeed } from "@/lib/driverContext/assemble";
 import type { LocationApiResponse } from "@/lib/api/location";
@@ -46,27 +48,46 @@ import type { LocationApiResponse } from "@/lib/api/location";
 // dependency module both this file and client components import from. See
 // that file for the full field comments (unchanged from before this move).
 
-export async function getMockDriverLocation(driverId: string): Promise<LocationApiResponse> {
-  const [vehicle, daily] = await Promise.all([
-    getDriverVehicleContext(driverId),
-    getDriverDailySummary(driverId),
-  ]);
+/**
+ * Non-pilot path. Remove Implicit Demo Fallback (2026-10-08): renamed from
+ * getMockDriverLocation, and no longer mock.
+ *
+ * It used to compose lib/samsara.ts's getDriverVehicleContext +
+ * getDriverDailySummary, which meant a normal user with no provider mapping
+ * received fabricated coordinates, a fabricated location label, a fabricated
+ * zone name and risk, a fabricated speed, a hardcoded heading of "W", a
+ * fabricated weather risk, a fabricated mileage figure AND a fabricated
+ * inspection count — reported as origin "simulated", state "fresh".
+ *
+ * Every provider-derived field is now null with state "unavailable".
+ *
+ * checksPassed is the one exception, and deliberately so: it comes from
+ * fetchTodaySummaryData, which counts real Inspection rows for this driver.
+ * A driver with no telematics mapping can still have completed genuine
+ * vehicle inspections in SafeHaul, and that is a verified database fact we
+ * own. Removing implicit demo data must not also remove real data — so this
+ * stays, while the mock getMockInspectionSummary value it used to carry does
+ * not. isPilot=false is passed through, so milesDriven comes back null
+ * (see lib/todaySummary.ts::resolveMilesDriven) rather than a mock constant.
+ */
+export async function getUnavailableDriverLocation(driverId: string): Promise<LocationApiResponse> {
+  const summary = await fetchTodaySummaryData(driverId, false);
 
   return {
     driverId,
-    lat:           vehicle.lat,
-    lng:           vehicle.lng,
-    locationLabel: vehicle.locationLabel,
-    zoneName:      vehicle.zoneName,
-    zoneRisk:      vehicle.zoneRisk,
-    currentSpeed:  vehicle.currentSpeed,
-    heading:       "W",  // TODO: derive from consecutive GPS readings
-    weatherRisk:   vehicle.weatherRisk,
-    checksPassed:  daily.checksPassed,
-    milesDriven:   daily.milesDriven,
+    lat:           null,
+    lng:           null,
+    locationLabel: null,
+    zoneName:      null,
+    zoneRisk:      null,
+    currentSpeed:  null,
+    heading:       null,
+    weatherRisk:   null,
+    checksPassed:  summary.checksPassed,
+    milesDriven:   summary.milesDriven,
     updatedAt:     new Date().toISOString(),
-    origin:        "simulated",
-    state:         "fresh",
+    origin:        null,
+    state:         "unavailable",
   };
 }
 
