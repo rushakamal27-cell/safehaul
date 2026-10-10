@@ -5,6 +5,7 @@ import {
   buildTripAuditItem,
   buildDailySafetyScoreAuditItem,
   buildDailyDrivingSummaryAuditItem,
+  LEGACY_PROVENANCE_META,
 } from "../auditItems";
 
 describe("buildComplianceScoreAuditItem", () => {
@@ -30,7 +31,7 @@ describe("buildComplianceScoreAuditItem", () => {
       id: "cs_1", score: 94.6666666, dangerLevel: "LOW", updatedAt: new Date(),
     });
     assert.equal(event.detail, "Driver safety score: 95 out of 100");
-    assert.deepEqual(event.meta, ["📊 95/100"]);
+    assert.deepEqual(event.meta, ["📊 95/100", LEGACY_PROVENANCE_META]);
   });
 
   test("an exact integer average still displays cleanly", () => {
@@ -53,8 +54,7 @@ describe("buildComplianceScoreAuditItem", () => {
 describe("buildTripAuditItem", () => {
   test("title is 'Daily Driving Summary', not 'Daily Trip'", () => {
     const { event } = buildTripAuditItem(
-      { id: "t_1", updatedAt: new Date(), milesDriven: 448, weatherData: null },
-      true
+      { id: "t_1", updatedAt: new Date(), milesDriven: 448, weatherData: null }
     );
     assert.equal(event.title, "Daily Driving Summary");
   });
@@ -62,8 +62,7 @@ describe("buildTripAuditItem", () => {
   test("displayed timestamp is the row's updatedAt (latest snapshot refresh), not startedAt", () => {
     const updatedAt = new Date("2026-08-20T14:36:06.571Z");
     const { ts, event } = buildTripAuditItem(
-      { id: "t_1", updatedAt, milesDriven: 448, weatherData: null },
-      true
+      { id: "t_1", updatedAt, milesDriven: 448, weatherData: null }
     );
     assert.equal(ts, updatedAt);
     assert.match(event.date, /2:36 PM UTC/);
@@ -71,8 +70,7 @@ describe("buildTripAuditItem", () => {
 
   test("real pilot mileage is unchanged: shown verbatim, no rounding/scaling applied here", () => {
     const { event } = buildTripAuditItem(
-      { id: "t_1", updatedAt: new Date(), milesDriven: 448, weatherData: null },
-      true
+      { id: "t_1", updatedAt: new Date(), milesDriven: 448, weatherData: null }
     );
     assert.ok(event.meta.includes("🛣 448 mi"));
   });
@@ -84,28 +82,35 @@ describe("buildTripAuditItem", () => {
         updatedAt: new Date(),
         milesDriven: 448,
         weatherData: { weatherRisk: 0.05, zoneRisk: 0, locationLabel: "Shiloh Road, Seneca, SC, 29678", zoneName: null },
-      },
-      true
+      }
     );
     assert.equal(event.detail, "Shiloh Road, Seneca, SC, 29678");
     assert.ok(event.meta.includes("🌦 Weather Risk 5%"));
     assert.ok(event.meta.includes("🗺 Area Risk 0%"));
   });
 
-  test("non-pilot (demo) rows are still tagged, matching prior behavior", () => {
+  // Legacy provenance label (2026-10-09). These two tests used to assert the
+  // old `🧪 Demo Data` chip, applied on `!pilotDriver` — the driver's status
+  // NOW, not when the row was written. They are inverted rather than deleted
+  // so the old behavior cannot come back unnoticed.
+  test("every retained legacy Trip row carries the provenance label", () => {
     const { event } = buildTripAuditItem(
-      { id: "t_1", updatedAt: new Date(), milesDriven: 100, weatherData: null },
-      false
+      { id: "t_1", updatedAt: new Date(), milesDriven: 100, weatherData: null }
     );
-    assert.ok(event.meta.includes("🧪 Demo Data"));
+    assert.ok(event.meta.includes(LEGACY_PROVENANCE_META));
   });
 
-  test("pilot rows are never tagged as demo data", () => {
+  test("the old 'Demo Data' chip is gone — it asserted a fact we cannot establish", () => {
     const { event } = buildTripAuditItem(
-      { id: "t_1", updatedAt: new Date(), milesDriven: 100, weatherData: null },
-      true
+      { id: "t_1", updatedAt: new Date(), milesDriven: 100, weatherData: null }
     );
     assert.ok(!event.meta.includes("🧪 Demo Data"));
+  });
+
+  test("the label does not depend on the driver's current pilot status", () => {
+    // The builder no longer takes pilotDriver at all, which is the
+    // enforcement: there is no argument left that could vary the label.
+    assert.equal(buildTripAuditItem.length, 1);
   });
 });
 
@@ -201,5 +206,79 @@ describe("buildDailyDrivingSummaryAuditItem", () => {
     assert.ok(event.meta.includes("🛣 705 mi"));
     assert.ok(event.meta.includes("🌦 Weather Risk 12%"));
     assert.ok(event.meta.includes("🗺 Area Risk 8%"));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Legacy provenance label (2026-10-09) — the full contract.
+//
+// The point of the label is that a reader can tell a legacy, unverifiable
+// card apart from an autonomous, verified-real one. Both card types share
+// their title, badge and score/mileage chips, so the label is the ONLY
+// distinguishing signal — these tests pin that asymmetry from both sides.
+describe("LEGACY_PROVENANCE_META", () => {
+  const CS_ROW = { id: "cs_1", score: 68.4, dangerLevel: "MEDIUM", updatedAt: new Date("2026-07-28T10:00:00.000Z") };
+  const TRIP_ROW = { id: "t_1", updatedAt: new Date("2026-07-28T10:00:00.000Z"), milesDriven: 448, weatherData: null };
+
+  test("states unverified provenance, and does not claim the row is fake", () => {
+    // Wording matters here: the row MAY be genuine. A label asserting demo
+    // data would be as wrong as no label at all, in the other direction.
+    assert.match(LEGACY_PROVENANCE_META, /Legacy record/);
+    assert.match(LEGACY_PROVENANCE_META, /provenance unverified/);
+    assert.ok(!/demo/i.test(LEGACY_PROVENANCE_META), "must not assert the row is demo/fake data");
+    assert.ok(!/simulated|fabricated|mock/i.test(LEGACY_PROVENANCE_META));
+  });
+
+  test("legacy ComplianceScore cards carry it", () => {
+    assert.ok(buildComplianceScoreAuditItem(CS_ROW).event.meta.includes(LEGACY_PROVENANCE_META));
+  });
+
+  test("legacy Trip cards carry it", () => {
+    assert.ok(buildTripAuditItem(TRIP_ROW).event.meta.includes(LEGACY_PROVENANCE_META));
+  });
+
+  test("it is added without disturbing the existing chips", () => {
+    // Appended, never replacing — the score/mileage a reader already relies
+    // on must still be there, in the same form.
+    const cs = buildComplianceScoreAuditItem(CS_ROW).event.meta;
+    assert.ok(cs.includes("📊 68/100"));
+    assert.equal(cs[cs.length - 1], LEGACY_PROVENANCE_META, "label goes last");
+
+    const trip = buildTripAuditItem({ ...TRIP_ROW, weatherData: { weatherRisk: 0.05, zoneRisk: 0, locationLabel: "Shiloh Road", zoneName: null } }).event.meta;
+    assert.ok(trip.includes("🛣 448 mi"));
+    assert.ok(trip.includes("🌦 Weather Risk 5%"));
+    assert.equal(trip[trip.length - 1], LEGACY_PROVENANCE_META, "label goes last");
+  });
+
+  test("appears exactly once per card", () => {
+    for (const meta of [buildComplianceScoreAuditItem(CS_ROW).event.meta, buildTripAuditItem(TRIP_ROW).event.meta]) {
+      assert.equal(meta.filter((m) => m === LEGACY_PROVENANCE_META).length, 1);
+    }
+  });
+
+  test("the verified-real autonomous cards must NOT carry it", () => {
+    // This is the half that makes the label meaningful. DailySafetyScore and
+    // DailyDrivingSummary come from the autonomous riskSampling pipeline and
+    // have defensible provenance; labelling them too would erase the
+    // distinction the label exists to draw.
+    const dss = buildDailySafetyScoreAuditItem({
+      id: "dss_1", averageScore: 68.4, sampleCount: 22, expectedSampleCount: 24,
+      dangerLevel: "MEDIUM", finalizedAt: new Date("2026-07-29T00:10:00.000Z"),
+    }).event;
+    const dds = buildDailyDrivingSummaryAuditItem({
+      id: "dds_1", startLocationLabel: "A", endLocationLabel: "B", routeSpanAvailable: true,
+      milesDriven: 448, weatherRiskAvg: 0.05, zoneRiskAvg: 0,
+      finalizedAt: new Date("2026-07-29T00:10:00.000Z"),
+    }).event;
+
+    assert.ok(!dss.meta.includes(LEGACY_PROVENANCE_META));
+    assert.ok(!dds.meta.includes(LEGACY_PROVENANCE_META));
+
+    // And the label really is the only thing telling them apart, which is
+    // why it cannot be dropped: titles and badges are identical by design.
+    assert.equal(dss.title, buildComplianceScoreAuditItem(CS_ROW).event.title);
+    assert.equal(dss.badge, buildComplianceScoreAuditItem(CS_ROW).event.badge);
+    assert.equal(dds.title, buildTripAuditItem(TRIP_ROW).event.title);
+    assert.equal(dds.badge, buildTripAuditItem(TRIP_ROW).event.badge);
   });
 });
