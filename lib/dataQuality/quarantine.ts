@@ -18,6 +18,49 @@
  * set. The Audit timeline continues to show what was actually recorded.
  *
  * Nothing here deletes, rewrites, or recomputes anything.
+ *
+ * ---------------------------------------------------------------------------
+ * REQUIREMENT FOR PHASE 7 DATASET LOADERS (recorded 2026-10-09)
+ *
+ * Phase 6D closes with this module still unwired, by explicit product
+ * decision. Integrating it into /api/audit is DEFERRED — the Audit timeline
+ * goes on showing quarantined rows as recorded. Any Phase 7 loader MUST
+ * therefore do the filtering itself. Specifics established by a read-only
+ * production audit on 2026-10-08, so the next implementer does not have to
+ * rediscover them:
+ *
+ *   1. Call isHistoricalDataQuarantined for EVERY row of every type listed in
+ *      an entry's `affects` before admitting it. Today that means
+ *      DriverObservation, SafetyScoreSample, DailySafetyScore and
+ *      DailyDrivingSummary. Measured impact: 34 DailySafetyScore + 34
+ *      DailyDrivingSummary rows are quarantined for the one affected driver;
+ *      all five other pilots have ZERO quarantined rows.
+ *
+ *   2. Pass the row's own bucket instant as `at`, never "now" — see
+ *      QuarantineQuery.at. For DailySafetyScore/DailyDrivingSummary that is
+ *      the UTC-midnight `date`.
+ *
+ *   3. WHOLE DAYS ARE MIXED, and the midnight-`at` convention in (2) handles
+ *      it correctly BY CONSTRUCTION — do not "improve" it into an
+ *      instant-level comparison. The entry's end bound
+ *      (2026-10-07T17:20:03.621Z) falls mid-day, so that day's single
+ *      DailySafetyScore row averages 24 hourly samples of which 18 (buckets
+ *      00:00-17:00) are contaminated and 6 (18:00-23:00) are clean, yet it is
+ *      stored as one indivisible score of 47.9 at sampleCount 24/24. Passing
+ *      midnight quarantines the whole day, which is the right conservative
+ *      answer: a partly-poisoned average cannot be salvaged without
+ *      recomputing it from the surviving samples. If a loader ever wants that
+ *      day back, it must rebuild the average from SafetyScoreSample rows that
+ *      individually clear the predicate — never by relaxing this bound.
+ *
+ *   4. DriverEvent, Trip and ComplianceScore are deliberately absent from
+ *      `affects` and must stay usable. Genuine incidents, inspections and
+ *      provider events are unaffected by vehicle misattribution.
+ *
+ *   5. For pre-fix rows, do not trust SafetyScoreSample's stored
+ *      `contextStatus` column — recompute from breakdownJson.contextSources
+ *      via lib/dataQuality/historicalSamples.ts. That is a separate defect
+ *      from this one and both apply to overlapping rows.
  */
 
 /**

@@ -144,6 +144,12 @@ const META_EXACT_LABELS: Record<string, string> = {
   "📍 GPS location recorded": "📍 Зафиксировано местоположение GPS",
   "📍 GPS recorded":          "📍 Зафиксировано GPS",
   "🧪 Demo Data":              "🧪 Демо-данные",
+  // Legacy Trip/ComplianceScore provenance chip — see
+  // lib/auditItems.ts::LEGACY_PROVENANCE_META. Must stay byte-identical to
+  // that constant's value or the exact-match lookup silently falls through
+  // and Russian readers get the English string.
+  "📄 Legacy record — provenance unverified":
+    "📄 Устаревшая запись — происхождение не подтверждено",
   "📷 Photo analyzed":         "📷 Фото проанализировано",
 };
 

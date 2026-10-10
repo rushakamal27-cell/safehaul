@@ -28,6 +28,31 @@ export interface StampedAuditEvent {
   event: AuditEvent;
 }
 
+/**
+ * Appended to every legacy Trip / ComplianceScore card (2026-10-09).
+ *
+ * As of the legacy synthetic-history exclusion, the only rows that still
+ * REACH these two builders are the ones lib/dataQuality/legacyHistory.ts
+ * classified `ambiguous`: a DriverProviderMapping existed when they were
+ * written, so they may be genuine pre-cutover pilot history — but whether
+ * isPilot/isActive were true at that moment is recorded nowhere, so it
+ * cannot be confirmed. Positively-identified synthetic rows are filtered out
+ * upstream in app/api/audit/route.ts and never get here.
+ *
+ * Without this chip those cards are indistinguishable from the autonomous,
+ * verified-real DailySafetyScore / DailyDrivingSummary cards: same titles
+ * ("Daily Safety Score" / "Daily Driving Summary"), same badges, same score
+ * and mileage chips. A reader cannot tell which numbers are defensible.
+ *
+ * It replaces the old `🧪 Demo Data` chip rather than joining it. That chip
+ * asserted the row IS demo data, which is exactly the claim we established
+ * we cannot make — and it was applied on the inverse of the right condition
+ * anyway (`!pilotDriver`, the driver's status NOW, not at write time), so
+ * every retained row belonging to a currently-active pilot showed no chip at
+ * all. "Provenance unverified" is the honest statement for all of them.
+ */
+export const LEGACY_PROVENANCE_META = "📄 Legacy record — provenance unverified";
+
 export interface ComplianceScoreAuditRow {
   id: string;
   score: number;
@@ -60,7 +85,7 @@ export function buildComplianceScoreAuditItem(cs: ComplianceScoreAuditRow): Stam
       badgeType,
       title: "Daily Safety Score",
       detail: `Driver safety score: ${displayScore} out of 100`,
-      meta: [`📊 ${displayScore}/100`],
+      meta: [`📊 ${displayScore}/100`, LEGACY_PROVENANCE_META],
     },
   };
 }
@@ -78,7 +103,7 @@ export interface TripAuditRow {
  * updatedAt tracks the actual snapshot, unlike startedAt (only the day's
  * first /api/risk call, which the snapshot may have long since moved past).
  */
-export function buildTripAuditItem(trip: TripAuditRow, pilotDriver: boolean): StampedAuditEvent {
+export function buildTripAuditItem(trip: TripAuditRow): StampedAuditEvent {
   const weather = trip.weatherData as Record<string, any> | null;
   const miles   = trip.milesDriven > 0 ? `${trip.milesDriven} mi` : null;
   const loc     = weather?.locationLabel ?? null;
@@ -100,7 +125,7 @@ export function buildTripAuditItem(trip: TripAuditRow, pilotDriver: boolean): St
         ...(weather?.zoneRisk != null
           ? [`🗺 Area Risk ${Math.round(weather.zoneRisk * 100)}%`]
           : []),
-        ...(!pilotDriver ? ["🧪 Demo Data"] : []),
+        LEGACY_PROVENANCE_META,
       ],
     },
   };
